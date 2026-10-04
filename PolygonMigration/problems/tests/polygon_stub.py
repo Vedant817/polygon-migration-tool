@@ -18,6 +18,7 @@ Payload shapes follow the official Polygon API documentation
 import io
 import json
 import zipfile
+from unittest import mock
 
 PROBLEM_HTML = """<html><body>
 <div class="problem-index">A</div>
@@ -238,3 +239,15 @@ def default_tests(sample_count=3, regular_count=12):
         tests.append(make_test(idx, sample=False, manual=False))
         idx += 1
     return tests
+
+
+def disable_pacing(testcase):
+    """Switch off PolygonAPI request pacing so a test run is not slowed by it.
+
+    The pacing exists because a real migration issues ~25 requests back to back
+    and Polygon answers 429. Against the stub there is no rate limit, so the
+    0.25s gap between calls would only make the suite 20x slower.
+    """
+    patcher = mock.patch("problems.polygon_api.MIN_REQUEST_INTERVAL", 0.0)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)

@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 
 from problems.polygon_api import REQUEST_TIMEOUT, PolygonAPI
 from problems.tests import polygon_stub as stub
+from problems.tests import polygon_stub as stubmod
 
 
 class ApiSigTests(SimpleTestCase):
@@ -16,6 +17,7 @@ class ApiSigTests(SimpleTestCase):
     """
 
     def setUp(self):
+        stubmod.disable_pacing(self)
         self.api = PolygonAPI()
 
     def test_signature_is_six_random_chars_plus_sha512_hex(self):
@@ -74,6 +76,7 @@ class ApiSigTests(SimpleTestCase):
 
 class RequestTests(SimpleTestCase):
     def setUp(self):
+        stubmod.disable_pacing(self)
         self.patcher = mock.patch("problems.polygon_api.requests.post")
         self.post = self.patcher.start()
         self.addCleanup(self.patcher.stop)

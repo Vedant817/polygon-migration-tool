@@ -266,14 +266,14 @@ def index(request):
                         if all_test_cases is None:
                             logger.warning('Test cases not found in Redis, fetching from Polygon')
                             all_test_cases = api.get_all_test_cases(polygon_id)
-                            api.store_test_cases_in_redis(polygon_id, all_test_cases, expiry_hours=0.5)
+                            api.cache_test_cases(polygon_id, all_test_cases)
                         else:
                             logger.info('Retrieved test cases from Redis for test case migration to DB (saved Polygon API call)')
                     else:
                         all_test_cases = api.get_all_test_cases(polygon_id)
                         logger.debug('Fetched all test cases.')
                         # Store test cases in Redis for this platform (30 minutes expiry)
-                        api.store_test_cases_in_redis(polygon_id, all_test_cases, expiry_hours=0.5)
+                        api.cache_test_cases(polygon_id, all_test_cases)
                         
                     
                     # Prepare test cases for display with truncated content
@@ -437,7 +437,7 @@ def index(request):
                             logger.warning('Test cases not found in Redis, fetching from Polygon')
                             test_cases = api.get_all_test_cases(polygon_id)
                             # Store them in Redis for future use
-                            api.store_test_cases_in_redis(polygon_id, test_cases, expiry_hours=0.5)
+                            api.cache_test_cases(polygon_id, test_cases)
                         else:
                             logger.info('Retrieved test cases from Redis for test case migration to DB (saved Polygon API call)')
                         
@@ -516,7 +516,7 @@ def index(request):
                             logger.warning('Test cases not found in Redis, fetching from Polygon')
                             test_cases = api.get_all_test_cases(polygon_id)
                             # Store them in Redis for future use
-                            api.store_test_cases_in_redis(polygon_id, test_cases, expiry_hours=0.5)
+                            api.cache_test_cases(polygon_id, test_cases)
                         else:
                             logger.info('Retrieved test cases from Redis for test case migration to DB (saved Polygon API call)')
                         

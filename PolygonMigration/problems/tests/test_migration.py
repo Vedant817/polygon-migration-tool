@@ -18,6 +18,7 @@ from problems.models import Problem, ProblemTag, ProblemTestCase, SampleTestCase
 from problems.polygon_api import PolygonAPI
 from problems.storage import BlobStorageError, build_problem_prefix, get_storage
 from problems.tests import polygon_stub as stub
+from problems.tests import polygon_stub as stubmod
 from problems.tests.test_storage import MemoryStorage
 
 User = get_user_model()
@@ -33,6 +34,7 @@ class MigrationTestBase(TestCase):
     """Shared wiring: a staff user, an isolated polygon id, isolated storage."""
 
     def setUp(self):
+        stubmod.disable_pacing(self)
         self.user = User.objects.create_user(
             email="staff@example.com", password="s3cret-pass-123",
             username="staff", first_name="Ada", last_name="L", is_staff=True,
@@ -480,6 +482,7 @@ class EdgeCaseCTests(MigrationTestBase):
     """Two different Polygon problems sharing the title 'Two Sum'."""
 
     def setUp(self):
+        stubmod.disable_pacing(self)
         super().setUp()
         self.second_polygon_id = f"S{uuid.uuid4().int % 10**9}"
 
@@ -656,6 +659,7 @@ class RealStorageWorkflowTests(MigrationTestBase):
     """The same workflow, but writing to the real configured storage backend."""
 
     def setUp(self):
+        stubmod.disable_pacing(self)
         super().setUp()
         try:
             self.real_storage = get_storage()

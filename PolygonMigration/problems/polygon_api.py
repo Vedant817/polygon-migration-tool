@@ -31,6 +31,16 @@ REDIS_PREFIX = "polygon_migration_test_cases_"
 #: upstream request would block the Django worker indefinitely.
 REQUEST_TIMEOUT = (10, 120)  # (connect, read)
 
+#: Minimum gap between consecutive Polygon calls. A 12-test migration is ~25
+#: requests; sending them back to back makes Polygon answer 429 and the affected
+#: tests silently end up empty.
+MIN_REQUEST_INTERVAL = 0.25
+
+#: HTTP statuses worth retrying: rate limiting and transient upstream faults.
+RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+REQUEST_ATTEMPTS = 4
+RETRY_BACKOFF_SECONDS = 1.0
+
 class PolygonAPI:
     """
     A service class to interact with the Polygon API.
@@ -44,6 +54,10 @@ class PolygonAPI:
         """
         self.api_key = settings.POLYGON_API_KEY
         self.api_secret = settings.POLYGON_API_SECRET
+        #: Number of tests whose content could not be fetched by the most recent
+        #: get_all_test_cases call. See cache_test_cases().
+        self.last_fetch_incomplete = 0
+        self._last_request_at = 0.0
 
     def _generate_api_sig(self, method_name, params):
         """
@@ -99,16 +113,38 @@ class PolygonAPI:
             params = {}
         
         api_sig, request_time = self._generate_api_sig(method_name, params.copy())
-        
+
         post_params = params.copy()
         post_params['apiKey'] = self.api_key
         post_params['apiSig'] = api_sig
         post_params['time'] = request_time
-        
-        try:
-            response = requests.post(f"{self.API_URL}{method_name}", data=post_params, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
 
+        url = f"{self.API_URL}{method_name}"
+        response = None
+        for attempt in range(1, REQUEST_ATTEMPTS + 1):
+            # Polygon rate-limits bursts. A 12-test migration is ~25 calls, so
+            # space consecutive requests out instead of hammering the API.
+            elapsed = time.monotonic() - self._last_request_at
+            if self._last_request_at and elapsed < MIN_REQUEST_INTERVAL:
+                time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+            self._last_request_at = time.monotonic()
+
+            try:
+                response = requests.post(url, data=post_params, timeout=REQUEST_TIMEOUT)
+                response.raise_for_status()
+                break
+            except requests.exceptions.RequestException as e:
+                status = getattr(e.response, "status_code", None)
+                if status in RETRY_STATUS_CODES and attempt < REQUEST_ATTEMPTS:
+                    delay = RETRY_BACKOFF_SECONDS * attempt
+                    logger.warning(
+                        "Polygon %s returned HTTP %s (attempt %d/%d); retrying in %.1fs",
+                        method_name, status, attempt, REQUEST_ATTEMPTS, delay)
+                    time.sleep(delay)
+                    continue
+                raise Exception(f"HTTP Request Error: {e}")
+
+        try:
             if not expect_json:
                 # Plain-text methods still answer with the JSON envelope when they
                 # fail. Returning that verbatim would store the error message as
@@ -389,20 +425,21 @@ class PolygonAPI:
         logger.info("Fetching all test cases for %s, testset", problem_id)
         tests = self._make_request('problem.tests', {'problemId': problem_id, 'testset': testset})
         all_cases = []
-        
+        incomplete = 0
+
         logger.info("Found %d test cases to process", len(tests))
-        
+
         for test in tests:
             test_index = test['index']
             logger.info("Processing test case %d/%d (index: %s)", len(all_cases) + 1, len(tests), test_index)
-            
+
             test_case = {
                 'index': test_index,
                 'manual': test.get('manual', False),
                 'is_sample': test.get('useInStatements', False),
                 'description': test.get('description', '')
             }
-            
+
             # For all tests, fetch input and output using the API
             try:
                 logger.debug("Fetching input for test case %s", test_index)
@@ -411,24 +448,29 @@ class PolygonAPI:
                     'testset': testset,
                     'testIndex': test_index
                 }) or ''
-                
+
                 logger.debug("Fetching output for test case %s", test_index)
                 test_case['output'] = self._make_plain_request('problem.testAnswer', {
                     'problemId': problem_id,
                     'testset': testset,
                     'testIndex': test_index
                 }) or ''
-                
-                logger.info("Successfully fetched test case %s - Input length: %d, Output length: %d", 
-                          test_index, len(test_case['input']), len(test_case['output']))
-                
+
+                logger.info("Successfully fetched test case %s - Input length: %d, Output length: %d",
+                            test_index, len(test_case['input']), len(test_case['output']))
+
             except Exception as e:
-                logger.warning(f"Error fetching test case {test_index}: {e}")
+                logger.warning("Error fetching test case %s: %s", test_index, e)
                 test_case['input'] = ''
                 test_case['output'] = ''
-            
+                incomplete += 1
+
             all_cases.append(test_case)
-        
+
+        self.last_fetch_incomplete = incomplete
+        if incomplete:
+            logger.warning("Fetch of %s is INCOMPLETE: %d of %d test(s) have no content",
+                           problem_id, incomplete, len(all_cases))
         logger.info("Completed fetching all %d test cases for problem %s", len(all_cases), problem_id)
         return all_cases
 
@@ -689,7 +731,7 @@ class PolygonAPI:
         if test_cases is None:
             logger.warning('Test cases not found in Redis, fetching from Polygon')
             test_cases = self.get_all_test_cases(problem_id, testset)
-            self.store_test_cases_in_redis(problem_id, test_cases, expiry_hours=0.5)
+            self.cache_test_cases(problem_id, test_cases)
         else:
             logger.info('Retrieved test cases from Redis for storage migration (saved Polygon API call)')
 
@@ -727,6 +769,29 @@ class PolygonAPI:
 
         logger.info("Completed migrate_to_storage for problem %s", problem_id)
         return uploaded_count, skipped, checker_key
+
+    def cache_test_cases(self, polygon_id, test_cases):
+        """Cache test cases in Redis, but only if the fetch was complete.
+
+        get_all_test_cases() yields empty input/output for any test it could not
+        fetch (rate limit, timeout, upstream error). Caching such a partial list
+        would turn a transient upstream failure into 30 minutes of silently
+        missing tests, so it is refused.
+
+        Args:
+            polygon_id (str): The Polygon problem ID.
+            test_cases (list): The test cases just fetched from Polygon.
+
+        Returns:
+            bool: True if the list was cached, False if it was incomplete.
+        """
+        if getattr(self, "last_fetch_incomplete", 0):
+            logger.warning(
+                "Not caching test cases for polygon_id %s: %d test(s) could not be "
+                "fetched from Polygon", polygon_id, self.last_fetch_incomplete)
+            return False
+        self.store_test_cases_in_redis(polygon_id, test_cases, expiry_hours=0.5)
+        return True
 
     def store_test_cases_in_redis(self, polygon_id, test_cases, expiry_hours=0.5):
         """
