@@ -134,6 +134,23 @@ AZURE_USERNAME = os.getenv("AZURE_USERNAME")
 AZURE_PASSWORD = os.getenv("AZURE_PASSWORD")
 AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME")
 
+# Cloud storage provider selection. The migration flow talks only to the
+# problems.storage.BlobStorage interface; provider SDKs stay behind it.
+# Options: "azure", "s3" (Amazon S3 / Cloudflare R2 / MinIO), "local".
+STORAGE_PROVIDER = os.getenv("STORAGE_PROVIDER", "azure")
+STORAGE_CONTAINER_NAME = os.getenv("STORAGE_CONTAINER_NAME") or AZURE_CONTAINER_NAME
+
+# Filesystem backend, used only for local verification without cloud credentials.
+STORAGE_LOCAL_DIR = os.getenv("STORAGE_LOCAL_DIR")
+
+# S3-compatible storage. Leave S3_ENDPOINT_URL empty for Amazon S3; set it for
+# Cloudflare R2 or MinIO.
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL")
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID")
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY")
+S3_REGION_NAME = os.getenv("S3_REGION_NAME", "us-east-1")
+S3_ADDRESSING_STYLE = os.getenv("S3_ADDRESSING_STYLE", "path")
+
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = os.getenv("REDIS_PORT")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")

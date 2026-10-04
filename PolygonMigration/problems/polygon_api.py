@@ -16,12 +16,25 @@ import shutil
 import subprocess
 import stat
 
+from .storage import (
+    BlobStorageError,
+    build_problem_prefix,
+    get_storage,
+)
+
 logger = logging.getLogger(__name__)
+
+#: Every Redis key this application writes starts with this prefix.
+REDIS_PREFIX = "polygon_migration_test_cases_"
+
+#: Seconds to wait for a single Polygon HTTP response. Without this a stalled
+#: upstream request would block the Django worker indefinitely.
+REQUEST_TIMEOUT = (10, 120)  # (connect, read)
 
 class PolygonAPI:
     """
     A service class to interact with the Polygon API.
-    Handles authentication and provides methods to fetch problem data, test cases, and manage migration to Azure.
+    Handles authentication and provides methods to fetch problem data, test cases, and manage migration to cloud storage.
     """
     API_URL = "https://polygon.codeforces.com/api/"
 
@@ -93,11 +106,24 @@ class PolygonAPI:
         post_params['time'] = request_time
         
         try:
-            response = requests.post(f"{self.API_URL}{method_name}", data=post_params)
+            response = requests.post(f"{self.API_URL}{method_name}", data=post_params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
 
             if not expect_json:
-                return response.text
+                # Plain-text methods still answer with the JSON envelope when they
+                # fail. Returning that verbatim would store the error message as
+                # test-case content, so detect and raise instead. The cheap
+                # startswith check keeps multi-megabyte test inputs off the JSON
+                # parser.
+                body = response.text
+                if body.lstrip().startswith("{"):
+                    try:
+                        envelope = json.loads(body)
+                    except (ValueError, TypeError, RecursionError):
+                        envelope = None
+                    if isinstance(envelope, dict) and envelope.get("status") == "FAILED":
+                        raise Exception(f"Polygon API Error: {envelope.get('comment')}")
+                return body
 
             # Only try to parse JSON if we expect it
             try:
@@ -184,7 +210,7 @@ class PolygonAPI:
                 'time': request_time
             }
             
-            response = requests.post(f"{self.API_URL}problem.package", data=post_params)
+            response = requests.post(f"{self.API_URL}problem.package", data=post_params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             
             # Check if response is actually a zip file
@@ -491,11 +517,14 @@ class PolygonAPI:
     def compile_custom_checker(self, source_code, temp_dir):
         """
         Compiles the custom checker source code using g++.
-        
+
+        When CUSTOM_CHECKER_DIR is set in the environment it is used as the
+        working directory instead of ``temp_dir``.
+
         Args:
             source_code (str): The C++ source code.
-            temp_dir (str): Temporary directory to work in (deprecated, kept for backward compatibility).
-            
+            temp_dir (str): Directory to compile in.
+
         Returns:
             str: Path to the compiled binary, or None if compilation failed.
         """
@@ -567,276 +596,137 @@ class PolygonAPI:
             logger.error(f"Error during compilation: {e}")
             return None
 
-    def upload_custom_checker_to_azure(self, problem_id, azure_account_url, azure_tenant_id, azure_client_id, azure_username, azure_password, container_name, db_problem_id=None):
+    def upload_custom_checker_to_storage(self, problem_id, storage, db_problem_id=None):
         """
-        Fetches, compiles, and uploads custom checker to Azure Blob Storage.
-        
+        Fetches, compiles and uploads the problem's custom checker through the
+        storage abstraction.
+
+        If compilation succeeds the compiled binary is uploaded; otherwise the
+        checker source is uploaded as ``custom_checker.cpp``.
+
         Args:
             problem_id (str): The Polygon problem ID.
-            azure_account_url (str): Azure Storage Account URL.
-            azure_tenant_id (str): Azure Tenant ID.
-            azure_client_id (str): Azure Client ID.
-            azure_username (str): Azure username.
-            azure_password (str): Azure password.
-            container_name (str): Azure Blob container name.
-            db_problem_id (str, optional): The database problem ID for naming. Defaults to None.
+            storage (problems.storage.BlobStorage): Destination storage.
+            db_problem_id (str, optional): Database problem ID used for object naming.
+
+        Returns:
+            str | None: The object key that was written, or None if there was no
+            custom checker or the upload failed.
         """
-        sys.path.append('.')
-        from problems.AzureTestcase import AzureBlobManager
-        
-        logger.info("Processing custom checker for problem %s", problem_id)
-        
-        # Get custom checker info
         checker_info = self.get_custom_checker_info(problem_id)
         if not checker_info:
             logger.info("No custom checker found for problem %s", problem_id)
-            return
-        
-        logger.info("Custom checker info retrieved: %s", checker_info)
-        
-        # Fetch custom checker source code
+            return None
+
         source_code = self.fetch_custom_checker_file(problem_id, checker_info['name'])
         if not source_code:
             logger.error("Failed to fetch custom checker source code")
-            return
-        
-        logger.info("Custom checker source code fetched successfully, length: %d", len(source_code))
-        
-        # Use CUSTOM_CHECKER_DIR from environment if available
-        checker_dir = settings.CUSTOM_CHECKER_DIR
-        logger.info("Initializing Azure Blob Manager for custom checker upload")
-        blob_manager = AzureBlobManager(
-            account_url=azure_account_url,
-            tenant_id=azure_tenant_id,
-            client_id=azure_client_id,
-            username=azure_username,
-            password=azure_password
-        )
-        
-        if checker_dir:
-            if not os.path.exists(checker_dir):
-                os.makedirs(checker_dir, exist_ok=True)
-            temp_dir = checker_dir
+            return None
 
-            # Compile the custom checker
+        problem_id_for_naming = db_problem_id if db_problem_id is not None else problem_id
+        prefix = build_problem_prefix(problem_id_for_naming)
+
+        work_dir = settings.CUSTOM_CHECKER_DIR
+        temp_dir_context = None
+        if work_dir:
+            os.makedirs(work_dir, exist_ok=True)
+            temp_dir = work_dir
+        else:
+            temp_dir_context = tempfile.TemporaryDirectory()
+            temp_dir = temp_dir_context.name
+
+        try:
             binary_path = self.compile_custom_checker(source_code, temp_dir)
-            if not binary_path:
-                logger.warning("Failed to compile custom checker, uploading source code instead")
-                # Upload source code as fallback
-                try:                    
-                    problem_id_for_naming = db_problem_id if db_problem_id is not None else problem_id
-                    blob_name = f"test_cases/{problem_id_for_naming}/custom_checker.cpp"
-                                        
-                    blob_client = blob_manager.blob_service_client.get_blob_client(
-                        container=container_name, 
-                        blob=blob_name
-                    )
-                    blob_client.upload_blob(source_code.encode('utf-8'), overwrite=True)
-                    logger.info(f"Uploaded custom checker source code to {blob_name}")
-                    return
-                except Exception as e:
-                    logger.error(f"Error uploading custom checker source code: {e}")
-                    return
-            
-            logger.info("Custom checker compiled successfully at: %s", binary_path)
-            
-            # Read the compiled binary
-            try:
+            if binary_path:
                 with open(binary_path, 'rb') as f:
                     binary_data = f.read()
-                logger.info("Binary file read successfully, size: %d bytes", len(binary_data))
-            except Exception as e:
-                logger.error(f"Error reading compiled binary: {e}")
-                return
-            
-            problem_id_for_naming = db_problem_id if db_problem_id is not None else problem_id
-            
-            # Use the same OS detection logic for Azure blob name
-            if sys.platform.startswith('win'):
-                blob_filename = 'custom_checker.exe'
-            else:
-                blob_filename = 'custom_checker'
-            
-            blob_name = f"test_cases/{problem_id_for_naming}/{blob_filename}"
-            
-            logger.info("Uploading custom checker to blob: %s", blob_name)
-            
-            try:
-                blob_client = blob_manager.blob_service_client.get_blob_client(
-                    container=container_name, 
-                    blob=blob_name
-                )
-                blob_client.upload_blob(binary_data, overwrite=True)
-                logger.info(f"Successfully uploaded custom checker to {blob_name}")
-            except Exception as e:
-                logger.error(f"Error uploading custom checker: {e}")
-                logger.error(f"Container: {container_name}, Blob: {blob_name}")
-                logger.error(f"Binary size: {len(binary_data)} bytes")
-        else:
-            # Fallback to temporary directory if CUSTOM_CHECKER_DIR is not set
-            with tempfile.TemporaryDirectory() as temp_dir:
-                logger.info("Created temporary directory for compilation: %s", temp_dir)
-                # Compile the custom checker
-                binary_path = self.compile_custom_checker(source_code, temp_dir)
-                if not binary_path:
-                    logger.warning("Failed to compile custom checker, uploading source code instead")
-                    # Upload source code as fallback
-                    try:                        
-                        problem_id_for_naming = db_problem_id if db_problem_id is not None else problem_id
-                        blob_name = f"test_cases/{problem_id_for_naming}/custom_checker.cpp"
-                                            
-                        blob_client = blob_manager.blob_service_client.get_blob_client(
-                            container=container_name, 
-                            blob=blob_name
-                        )
-                        blob_client.upload_blob(source_code.encode('utf-8'), overwrite=True)
-                        logger.info(f"Uploaded custom checker source code to {blob_name}")
-                        return
-                    except Exception as e:
-                        logger.error(f"Error uploading custom checker source code: {e}")
-                        return
-                
-                logger.info("Custom checker compiled successfully at: %s", binary_path)
-                
-                # Read the compiled binary
-                try:
-                    with open(binary_path, 'rb') as f:
-                        binary_data = f.read()
-                    logger.info("Binary file read successfully, size: %d bytes", len(binary_data))
-                except Exception as e:
-                    logger.error(f"Error reading compiled binary: {e}")
-                    return
-                             
-                problem_id_for_naming = db_problem_id if db_problem_id is not None else problem_id
-                
-                # Use the same OS detection logic for Azure blob name
-                if sys.platform.startswith('win'):
-                    blob_filename = 'custom_checker.exe'
-                else:
-                    blob_filename = 'custom_checker'
-                
-                blob_name = f"test_cases/{problem_id_for_naming}/{blob_filename}"
-                
-                logger.info("Uploading custom checker to blob: %s", blob_name)
-                
-                try:
-                    blob_client = blob_manager.blob_service_client.get_blob_client(
-                        container=container_name, 
-                        blob=blob_name
-                    )
-                    blob_client.upload_blob(binary_data, overwrite=True)
-                    logger.info(f"Successfully uploaded custom checker to {blob_name}")
-                except Exception as e:
-                    logger.error(f"Error uploading custom checker: {e}")
-                    logger.error(f"Container: {container_name}, Blob: {blob_name}")
-                    logger.error(f"Binary size: {len(binary_data)} bytes")
+                key = f"{prefix}{os.path.basename(binary_path)}"
+                storage.upload_bytes(key, binary_data)
+                logger.info("Uploaded compiled custom checker to %s (%d bytes)", key, len(binary_data))
+                return key
 
-    def migrate_to_azure_blob(self, problem_id, azure_account_url, azure_tenant_id, azure_client_id, azure_username, azure_password, container_name, db_problem_id=None, testset='tests'):
+            logger.warning("Failed to compile custom checker, uploading source code instead")
+            key = f"{prefix}custom_checker.cpp"
+            storage.upload_text(key, source_code)
+            logger.info("Uploaded custom checker source code to %s", key)
+            return key
+        except BlobStorageError:
+            raise
+        except Exception as exc:
+            raise BlobStorageError(f"Custom checker upload failed for problem {problem_id}: {exc}") from exc
+        finally:
+            if temp_dir_context is not None:
+                temp_dir_context.cleanup()
+
+    def migrate_to_storage(self, problem_id, db_problem_id=None, testset='tests'):
         """
-        Fetches all test cases from Redis (or Polygon as fallback) and uploads them to Azure Blob Storage using AzureBlobManager.
-        Each test case's input and output are uploaded as separate blobs.
-        Only test cases with both input and output are uploaded.
-        Also handles custom checker compilation and upload if present.
+        Uploads a problem's test cases to cloud storage through the
+        :class:`problems.storage.BlobStorage` abstraction.
+
+        Existing objects for the problem are replaced. A test case is uploaded
+        only when both its input and answer are non-empty; any storage failure
+        propagates as :class:`BlobStorageError` so partial uploads are visible.
+
+        Object layout (unchanged by provider):
+            test_cases/{problem_id}/{test_number}
+            test_cases/{problem_id}/{test_number}.a
 
         Args:
             problem_id (str): The Polygon problem ID.
-            azure_account_url (str): Azure Storage Account URL.
-            azure_tenant_id (str): Azure Tenant ID.
-            azure_client_id (str): Azure Client ID.
-            azure_username (str): Azure username.
-            azure_password (str): Azure password.
-            container_name (str): Azure Blob container name.
-            db_problem_id (str, optional): The database problem ID for naming. Defaults to None.
-            testset (str, optional): The testset name. Defaults to 'tests'.
+            db_problem_id (str, optional): Database problem ID used for object naming.
+            testset (str, optional): The Polygon testset. Defaults to 'tests'.
+
+        Returns:
+            tuple[int, list[int], str | None]: Number of test cases uploaded, the
+            1-based numbers of test cases that were skipped because input or
+            answer was empty, and the object key the custom checker was written
+            to (None when there is no custom checker or it could not be
+            retrieved).
         """
-        sys.path.append('.')  # Ensure root dir is in path for import
-        from problems.AzureTestcase import AzureBlobManager
+        logger.info("Starting migrate_to_storage for problem %s", problem_id)
 
-        logger.info("Starting migrate_to_azure_blob for problem %s", problem_id)
-
-        # Try to get test cases from Redis first
         test_cases = self.get_test_cases_from_redis(problem_id)
         if test_cases is None:
-            # Fallback to fetching from Polygon if not in Redis
             logger.warning('Test cases not found in Redis, fetching from Polygon')
             test_cases = self.get_all_test_cases(problem_id, testset)
-            # Store them in Redis for future use
             self.store_test_cases_in_redis(problem_id, test_cases, expiry_hours=0.5)
         else:
-            logger.info('Retrieved test cases from Redis for Azure migration (saved Polygon API call)')
-        
-        logger.info("Retrieved %d test cases for Azure migration", len(test_cases))
+            logger.info('Retrieved test cases from Redis for storage migration (saved Polygon API call)')
 
-        blob_manager = AzureBlobManager(
-            account_url=azure_account_url,
-            tenant_id=azure_tenant_id,
-            client_id=azure_client_id,
-            username=azure_username,
-            password=azure_password
-        )
+        logger.info("Retrieved %d test cases for storage migration", len(test_cases))
+
+        storage = get_storage()
+        storage.ensure_container()
 
         problem_id_for_naming = db_problem_id if db_problem_id is not None else problem_id
-        logger.info("Using problem_id_for_naming: %s", problem_id_for_naming)
-        
-        # Delete all test cases before updating the new ones
-        logger.info("Deleting existing test cases from Azure")
-        blob_manager.empty_blob(container_name, problem_id_for_naming)
+
+        # Replace any previously uploaded objects for this problem.
+        logger.info("Deleting existing objects with prefix %s", build_problem_prefix(problem_id_for_naming))
+        storage.delete_prefix(build_problem_prefix(problem_id_for_naming))
 
         uploaded_count = 0
+        skipped = []
         for idx, test in enumerate(test_cases, start=1):
             input_data = test.get('input', '')
             output_data = test.get('output', '')
             if input_data and output_data:
-                # Use database problem ID if provided, otherwise fall back to polygon_id
-                blob_manager.upload_test_case(container_name, problem_id_for_naming, idx, input_data, output_data)
+                storage.upload_test_case(problem_id_for_naming, idx, input_data, output_data)
                 uploaded_count += 1
             else:
-                logger.warning(f"Skipping test case #{idx}: missing input or output. input: {repr(input_data[:50] + ('...' if len(input_data) > 50 else ''))}, output: {repr(output_data[:50] + ('...' if len(output_data) > 50 else ''))}")
-        
-        logger.info("Uploaded %d test cases to Azure", uploaded_count)
-        
-        # Handle custom checker if present
-        logger.info("Starting custom checker processing for problem %s", problem_id)
-        self.upload_custom_checker_to_azure(
-            problem_id, 
-            azure_account_url, 
-            azure_tenant_id, 
-            azure_client_id, 
-            azure_username, 
-            azure_password, 
-            container_name, 
-            db_problem_id
-        )
-        logger.info("Completed custom checker processing for problem %s", problem_id)
-        logger.info("Completed migrate_to_azure_blob for problem %s", problem_id)
+                skipped.append(idx)
+                logger.warning("Skipping test case #%d: missing input or output.", idx)
 
-    def delete_problem_test_case_cache(self, db_problem_id):
-        """
-        Deletes all Redis cache keys related to test cases for a given database problem ID.
+        logger.info("Uploaded %d test cases to %s storage", uploaded_count, storage.provider)
+        if skipped:
+            logger.warning("Skipped %d test case(s) with missing input/output: %s",
+                           len(skipped), skipped)
 
-        Args:
-            db_problem_id (str): The database problem ID.
-        """
-        pattern = f"oj_dev_with_redis_storage_test_cases_{db_problem_id}*"
-        logger.info("pattern %s", pattern)
-        try:
-            REDIS_HOST = settings.REDIS_HOST
-            REDIS_PORT = settings.REDIS_PORT
-            REDIS_PASSWORD = settings.REDIS_PASSWORD
-            REDIS_SSL = settings.REDIS_SSL
-            r = redis.StrictRedis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                password=REDIS_PASSWORD,
-                ssl=REDIS_SSL,
-                ssl_cert_reqs=None
-            )
-            for key in r.scan_iter(pattern):
-                logger.info("deleting key %s", key)
-                r.delete(key)
-                
-        except Exception as e:
-            logger.error(f"Error deleting cache keys for pattern {pattern}: {e}")
+        checker_key = self.upload_custom_checker_to_storage(problem_id, storage, db_problem_id)
+        if checker_key:
+            logger.info("Custom checker stored at %s", checker_key)
+
+        logger.info("Completed migrate_to_storage for problem %s", problem_id)
+        return uploaded_count, skipped, checker_key
 
     def store_test_cases_in_redis(self, polygon_id, test_cases, expiry_hours=0.5):
         """
@@ -862,7 +752,7 @@ class PolygonAPI:
             )
             
             # Platform-specific prefix for this application
-            prefix = f"polygon_migration_test_cases_{polygon_id}"
+            prefix = f"{REDIS_PREFIX}{polygon_id}"
             
             # Store test case count
             count_key = f"{prefix}_count"
@@ -909,7 +799,7 @@ class PolygonAPI:
             )
             
             # Platform-specific prefix for this application
-            prefix = f"polygon_migration_test_cases_{polygon_id}"
+            prefix = f"{REDIS_PREFIX}{polygon_id}"
             
             # Get test case count
             count_key = f"{prefix}_count"
@@ -961,7 +851,7 @@ class PolygonAPI:
             )
             
             # Platform-specific prefix for this application
-            prefix = f"polygon_migration_test_cases_{polygon_id}"
+            prefix = f"{REDIS_PREFIX}{polygon_id}"
             pattern = f"{prefix}*"
             
             # Find and delete all keys matching the pattern
