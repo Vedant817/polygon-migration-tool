@@ -9,15 +9,10 @@
         body { padding: 0; margin: 0; }
         .data-section { margin-top: 2rem; }
         pre { background-color: #f8f9fa; padding: 1rem; border-radius: 5px; }
-        .button-group { margin: 1rem 0; }
-        .button-group .btn { margin-right: 0.5rem; }
-        .tags-container { max-height: 200px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 0.375rem; padding: 0.5rem; }
-        .tag-item { display: flex; align-items: center; padding: 0.25rem 0; }
-        .tag-item input[type="checkbox"] { margin-right: 0.5rem; }
-        .tag-item label { margin: 0; cursor: pointer; flex: 1; }
-        .tag-item:hover { background-color: #f8f9fa; }
-        .selected-tags-display { margin-top: 0.5rem; }
-        .selected-tag { display: inline-block; background-color: #007bff; color: white; padding: 0.25rem 0.5rem; margin: 0.125rem; border-radius: 0.25rem; font-size: 0.875rem; }
+        /* flex + wrap: the two migration buttons are long labels and previously sat
+           in inline-block forms on one unbreakable line, overflowing narrow screens */
+        .button-group { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 1rem 0; }
+        .button-group form { margin: 0; }
         
         /* New styles for search-based multiselect */
         .tags-search-container { position: relative; }
@@ -29,9 +24,13 @@
         .tag-option .tag-name { flex: 1; }
         .tag-option .add-new-tag { color: #28a745; font-weight: bold; }
         .selected-tags-section { margin-top: 1rem; }
-        .selected-tag-item { display: inline-block; background-color: #007bff; color: white; padding: 0.25rem 0.5rem; margin: 0.125rem; border-radius: 0.25rem; font-size: 0.875rem; }
-        .remove-tag { margin-left: 0.5rem; cursor: pointer; color: #fff; }
+        /* #007bff with white text is 3.98:1 and fails WCAG AA (4.5:1). #0b5ed7 is the
+           same hue at 5.84:1 and keeps the chip visually identical */
+        .selected-tag-item { display: inline-flex; align-items: center; background-color: #0b5ed7; color: white; padding: 0.25rem 0.5rem; margin: 0.125rem; border-radius: 0.25rem; font-size: 0.875rem; }
+        .remove-tag { margin-left: 0.5rem; cursor: pointer; color: #fff; background: none; border: 0; padding: 0; font-size: 1rem; line-height: 1; }
         .remove-tag:hover { color: #ffc107; }
+        /* keyboard users must be able to reach and see the tag list */
+        .remove-tag:focus-visible { outline: 2px solid #fff; outline-offset: 1px; border-radius: 2px; }
         
         /* Add space below navbar */
         .container { margin-top: 2rem; }
@@ -72,6 +71,16 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+
+        /* honour the OS reduced-motion setting: show a static bar, no spinning */
+        @media (prefers-reduced-motion: reduce) {
+            .spinner {
+                animation: none;
+                border-top-color: #0b5ed7;
+                border-right-color: #0b5ed7;
+                border-bottom-color: #0b5ed7;
+            }
+        }
         
         .loading-text {
             color: #333;
@@ -110,10 +119,10 @@
         </div>
     </nav>
 
-    <!-- Loading overlay -->
-    <div class="loading-overlay" id="loadingOverlay">
+    <!-- role=status + aria-live so the wait is announced instead of being a silent overlay -->
+    <div class="loading-overlay" id="loadingOverlay" role="status" aria-live="polite">
         <div class="loading-spinner">
-            <div class="spinner"></div>
+            <div class="spinner" aria-hidden="true"></div>
             <p class="loading-text">Fetching test cases...</p>
         </div>
     </div>
@@ -166,6 +175,7 @@
                     <tr><th>Algopath Link</th><td><a href="https://www.algopath.ai/problems/{{ db_problem.slug }}" target="_blank">https://www.algopath.ai/problems/{{ db_problem.slug }}</a></td></tr>
                 </table>
                 {% endif %}
+                <div class="table-responsive">
                 <table class="table table-bordered mt-4">
                     <tr><th>Slug</th><td>{{ fetched_problem.slug }}</td></tr>
                     <tr><th>Difficulty <span style="color: red;">*</span></th>
@@ -181,12 +191,14 @@
                     <tr><th>Tags</th>
                         <td>
                             <div class="tags-search-container">
-                                <input type="text" class="tags-search-input" id="tags-search-input" placeholder="Search for tags or type to add new..." autocomplete="off">
-                                <div class="tags-dropdown" id="tags-dropdown">
+                                <input type="text" class="tags-search-input" id="tags-search-input" placeholder="Search for tags or type to add new..." autocomplete="off"
+                                       role="combobox" aria-expanded="false" aria-controls="tags-dropdown"
+                                       aria-autocomplete="list" aria-label="Search or create tags">
+                                <div class="tags-dropdown" id="tags-dropdown" role="listbox" aria-label="Tag suggestions">
                                     <!-- Tag options will be populated here -->
                                 </div>
                             </div>
-                            <div class="selected-tags-section" id="selected-tags-section">
+                            <div class="selected-tags-section" id="selected-tags-section" aria-live="polite">
                                 <!-- Selected tags will be displayed here -->
                             </div>
                         </td>
@@ -199,6 +211,7 @@
                     {% endif %}
                     <tr><th>Test Case Count</th><td>{{ fetched_problem.test_case_count }}</td></tr>
                 </table>
+                </div>
                 
                 {% if fetched_problem.problem_statement %}
                     <div class="data-section">
@@ -365,7 +378,7 @@
     var allTags = {{ all_tags_json|safe }};
     var selectedTags = new Set({{ selected_tags_json|safe }});
     var searchInput, dropdown, selectedTagsSection, hiddenContainer;
-    
+
     // Initialize the tags interface
     document.addEventListener('DOMContentLoaded', function() {
         // Initialize elements
@@ -523,26 +536,42 @@
         tags.forEach(function(tag) {
             var option = document.createElement('div');
             option.className = 'tag-option';
-            
+            option.setAttribute('role', 'option');
+
             var checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.checked = selectedTags.has(tag.name);
+            option.setAttribute('aria-selected', checkbox.checked ? 'true' : 'false');
             checkbox.addEventListener('change', function() {
                 toggleTag(tag.name);
             });
-            
+
             var label = document.createElement('span');
             label.className = tag.isExisting ? 'tag-name' : 'tag-name add-new-tag';
             label.textContent = tag.isExisting ? tag.name : 'Add "' + tag.name + '"';
-            
+
             option.appendChild(checkbox);
             option.appendChild(label);
-            
+
+            function activate() {
+                checkbox.checked = !checkbox.checked;
+                toggleTag(tag.name);
+            }
+
+            // the whole row used to be click-only; keyboard users could not
+            // reach it, so mirror the click behaviour onto Enter and Space
+            option.tabIndex = 0;
+            option.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                    e.preventDefault();
+                    activate();
+                }
+            });
+
             // Add click handler for the entire option
             option.addEventListener('click', function(e) {
                 if (e.target !== checkbox) {
-                    checkbox.checked = !checkbox.checked;
-                    toggleTag(tag.name);
+                    activate();
                 }
             });
             
@@ -563,16 +592,33 @@
     // Update the selected tags display
     function updateSelectedTagsDisplay() {
         selectedTagsSection.innerHTML = '';
-        
+
         if (selectedTags.size === 0) {
-            selectedTagsSection.innerHTML = '<span class="text-muted">No tags selected</span>';
+            var empty = document.createElement('span');
+            empty.className = 'text-muted';
+            empty.textContent = 'No tags selected';
+            selectedTagsSection.appendChild(empty);
             return;
         }
-        
+
         selectedTags.forEach(function(tagName) {
             var tagElement = document.createElement('span');
             tagElement.className = 'selected-tag-item';
-            tagElement.innerHTML = tagName + '<span class="remove-tag" onclick="removeTag(\'' + tagName + '\')">&times;</span>';
+
+            // Built as text nodes, not innerHTML: the tag name is typed by the
+            // user, so interpolating it into markup would let a tag called
+            // <img src=x onerror=...> execute. It also used to produce invalid
+            // JavaScript whenever a tag contained an apostrophe.
+            tagElement.appendChild(document.createTextNode(tagName));
+
+            var remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'remove-tag';
+            remove.textContent = '\u00d7';
+            remove.setAttribute('aria-label', 'Remove tag ' + tagName);
+            remove.addEventListener('click', function() { removeTag(tagName); });
+
+            tagElement.appendChild(remove);
             selectedTagsSection.appendChild(tagElement);
         });
     }
@@ -609,12 +655,14 @@
     function showDropdown() {
         if (dropdown.children.length > 0) {
             dropdown.style.display = 'block';
+            if (searchInput) { searchInput.setAttribute('aria-expanded', 'true'); }
         }
     }
-    
+
     // Hide dropdown
     function hideDropdown() {
         dropdown.style.display = 'none';
+        if (searchInput) { searchInput.setAttribute('aria-expanded', 'false'); }
     }
     
     // Show full content in a modal
