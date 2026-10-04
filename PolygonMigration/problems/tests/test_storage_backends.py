@@ -189,6 +189,30 @@ class S3EnsureContainerTests(SimpleTestCase):
         with self.assertRaises(BlobStorageError):
             store.ensure_container()
 
+    def test_bucket_scoped_key_denied_head_bucket_still_proceeds(self):
+        """Backblaze bucket-scoped keys cannot list bucket names unless
+        listAllBucketNames is granted, so HeadBucket answers 403 for a bucket
+        that is perfectly usable. ensure_container must carry on, not fail."""
+        from botocore.stub import Stubber
+        store = self._store("us-east-005")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="AccessDenied",
+                                 service_message="Access Denied", http_status_code=403)
+        stubber.activate()
+        store.ensure_container()          # must not raise, must not attempt create_bucket
+        stubber.assert_no_pending_responses()
+
+    def test_invalid_credentials_still_raise(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="InvalidAccessKeyId",
+                                 service_message="Malformed Access Key Id",
+                                 http_status_code=403)
+        stubber.activate()
+        with self.assertRaises(BlobStorageError):
+            store.ensure_container()
+
     def test_already_owned_bucket_is_not_an_error(self):
         from botocore.stub import Stubber
         store = self._store("auto")

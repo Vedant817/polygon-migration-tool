@@ -233,10 +233,23 @@ class S3BlobStorage(BlobStorage):
             return
         except ClientError as exc:
             status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = exc.response.get("Error", {}).get("Code")
             if status == 404:
                 pass                       # bucket absent -> create it
             elif status in (301, 400):
                 # Bucket exists in another region / is owned elsewhere.
+                return
+            elif status in (401, 403) and code not in ("InvalidAccessKeyId",
+                                                  "SignatureDoesNotMatch",
+                                                  "ExpiredToken",
+                                                  "InvalidToken"):
+                # A key restricted to one bucket may not be allowed to list bucket
+                # names (Backblaze calls this listAllBucketNames), so HeadBucket
+                # answers 403 even though the bucket is perfectly usable. Carry on:
+                # the first upload is the real test and fails loudly if the bucket
+                # name is wrong. Credential errors are NOT swallowed - they raise.
+                logger.info("HeadBucket on %r returned %s (%s); continuing without "
+                            "creating it", self.container, status, code or "no code")
                 return
             else:
                 raise BlobStorageError(f"S3 bucket {self.container!r} unavailable: {exc}") from exc
