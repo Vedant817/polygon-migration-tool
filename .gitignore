@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# Polygon Migration Tool - git ignore rules
+# ---------------------------------------------------------------------------
+
+# --- Secrets / local environment -------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Local agent evidence (raw facts only, never submitted) ----------------
+.assessment-evidence/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+pip-wheel-metadata/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Django -----------------------------------------------------------------
+*.log
+logs/
+staticfiles/
+media/
+db.sqlite3
+db.sqlite3-journal
+local_settings.py
+
+# --- Test / coverage artifacts ----------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# --- Tooling / editors ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Local databases --------------------------------------------------------
+*.db
+*.sqlite3
+*.sqlite3-journal

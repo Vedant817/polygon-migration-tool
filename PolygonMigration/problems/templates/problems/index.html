@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polygon Problem Extractor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding: 0; margin: 0; }
+        .data-section { margin-top: 2rem; }
+        pre { background-color: #f8f9fa; padding: 1rem; border-radius: 5px; }
+        .button-group { margin: 1rem 0; }
+        .button-group .btn { margin-right: 0.5rem; }
+        .tags-container { max-height: 200px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 0.375rem; padding: 0.5rem; }
+        .tag-item { display: flex; align-items: center; padding: 0.25rem 0; }
+        .tag-item input[type="checkbox"] { margin-right: 0.5rem; }
+        .tag-item label { margin: 0; cursor: pointer; flex: 1; }
+        .tag-item:hover { background-color: #f8f9fa; }
+        .selected-tags-display { margin-top: 0.5rem; }
+        .selected-tag { display: inline-block; background-color: #007bff; color: white; padding: 0.25rem 0.5rem; margin: 0.125rem; border-radius: 0.25rem; font-size: 0.875rem; }
+        
+        /* New styles for search-based multiselect */
+        .tags-search-container { position: relative; }
+        .tags-search-input { width: 100%; padding: 0.5rem; border: 1px solid #ced4da; border-radius: 0.375rem; }
+        .tags-dropdown { position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ced4da; border-top: none; border-radius: 0 0 0.375rem 0.375rem; max-height: 200px; overflow-y: auto; z-index: 1000; display: none; }
+        .tag-option { display: flex; align-items: center; padding: 0.5rem; cursor: pointer; border-bottom: 1px solid #f8f9fa; }
+        .tag-option:hover { background-color: #f8f9fa; }
+        .tag-option input[type="checkbox"] { margin-right: 0.5rem; }
+        .tag-option .tag-name { flex: 1; }
+        .tag-option .add-new-tag { color: #28a745; font-weight: bold; }
+        .selected-tags-section { margin-top: 1rem; }
+        .selected-tag-item { display: inline-block; background-color: #007bff; color: white; padding: 0.25rem 0.5rem; margin: 0.125rem; border-radius: 0.25rem; font-size: 0.875rem; }
+        .remove-tag { margin-left: 0.5rem; cursor: pointer; color: #fff; }
+        .remove-tag:hover { color: #ffc107; }
+        
+        /* Add space below navbar */
+        .container { margin-top: 2rem; }
+        
+        /* Loading spinner styles */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+        }
+        
+        .loading-spinner {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            color: #333;
+            font-size: 1.1rem;
+            margin: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">Hatsu</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    {% if user.is_authenticated %}
+                        <li class="nav-item">
+                            <span class="navbar-text me-3">Welcome, {{ user.first_name }} {{ user.last_name }}</span>
+                        </li>
+                        <li class="nav-item">
+                            <form method="post" action="/users/logout/" style="display:inline;">
+                                {% csrf_token %}
+                                <button class="btn btn-outline-light btn-sm" type="submit">Logout</button>
+                            </form>
+                        </li>
+                    {% else %}
+                        <li class="nav-item">
+                            <a class="btn btn-outline-light btn-sm" href="/users/login/">Login</a>
+                        </li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <p class="loading-text">Fetching test cases...</p>
+        </div>
+    </div>
+
+    <div class="container">
+        <h1 class="mb-4">Hatsu: Problem Migrator</h1>
+
+        <form method="post" id="fetchForm">
+            {% csrf_token %}
+            <div class="input-group mb-3">
+                <input type="text" class="form-control" name="problem_id" placeholder="Enter Polygon Problem ID" required
+                       value="{{ problem_id|default:'' }}">
+                <button class="btn btn-primary" type="submit" id="fetchButton">Fetch Problem</button>
+            </div>
+        </form>
+
+        {% if error %}
+            <div class="alert alert-danger mt-4">
+                <h4>Error</h4>
+                <p>{{ error }}</p>
+            </div>
+        {% endif %}
+
+        {% if success %}
+            <div class="alert alert-success mt-4">
+                <h4>Success</h4>
+                <p>{{ success }}</p>
+            </div>
+        {% endif %}
+
+        {% if db_success %}
+            <div class="alert alert-info mt-4">
+                <h4>Database Operation</h4>
+                <p>{{ db_success }}</p>
+            </div>
+        {% endif %}
+
+        {% if fetched_problem %}
+            <div class="data-section">
+                <h2>Fetched Problem: {{ fetched_problem.title }} (Polygon ID: {{ fetched_problem.polygon_id }})</h2>
+                {% if not db_problem %}
+                <table class="table table-bordered mt-4">
+                    <tr><th>Database Problem ID</th><td>Please migrate to database first.</td></tr>
+                    <tr><th>Algopath Link</th><td>Please migrate to database first.</td></tr>
+                </table>
+                {% endif %}
+                {% if db_problem %}
+                <table class="table table-bordered mt-4">
+                    <tr><th>Database Problem ID</th><td>{{ db_problem.id }}</td></tr>
+                    <tr><th>Algopath Link</th><td><a href="https://www.algopath.ai/problems/{{ db_problem.slug }}" target="_blank">https://www.algopath.ai/problems/{{ db_problem.slug }}</a></td></tr>
+                </table>
+                {% endif %}
+                <table class="table table-bordered mt-4">
+                    <tr><th>Slug</th><td>{{ fetched_problem.slug }}</td></tr>
+                    <tr><th>Difficulty <span style="color: red;">*</span></th>
+                        <td>
+                            <select class="form-select" id="difficulty-select" style="max-width: 200px; display: inline-block;" required>
+                                <option value="" {% if not difficulty %}selected{% endif %}>Select Difficulty</option>
+                                <option value="easy" {% if difficulty == 'easy' %}selected{% endif %}>Easy</option>
+                                <option value="medium" {% if difficulty == 'medium' %}selected{% endif %}>Medium</option>
+                                <option value="hard" {% if difficulty == 'hard' %}selected{% endif %}>Hard</option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr><th>Tags</th>
+                        <td>
+                            <div class="tags-search-container">
+                                <input type="text" class="tags-search-input" id="tags-search-input" placeholder="Search for tags or type to add new..." autocomplete="off">
+                                <div class="tags-dropdown" id="tags-dropdown">
+                                    <!-- Tag options will be populated here -->
+                                </div>
+                            </div>
+                            <div class="selected-tags-section" id="selected-tags-section">
+                                <!-- Selected tags will be displayed here -->
+                            </div>
+                        </td>
+                    </tr>
+                    <tr><th>Time Limit</th><td>{{ fetched_problem.time_limit }} ms</td></tr>
+                    <tr><th>Memory Limit</th><td>{{ fetched_problem.memory_limit }} MB</td></tr>
+                    <tr><th>Checker Type</th><td>{{ fetched_problem.checker_type }}</td></tr>
+                    {% if fetched_problem.custom_checker_info %}
+                    <tr><th>Custom Checker</th><td>{{ fetched_problem.custom_checker_info.name }}</td></tr>
+                    {% endif %}
+                    <tr><th>Test Case Count</th><td>{{ fetched_problem.test_case_count }}</td></tr>
+                </table>
+                
+                {% if fetched_problem.problem_statement %}
+                    <div class="data-section">
+                        <h3>Problem Statement (Legend)</h3>
+                        <div class="card card-body">
+                            {{ fetched_problem.problem_statement|linebreaksbr }}
+                        </div>
+                    </div>
+                {% endif %}
+                {% if fetched_problem.input_format %}
+                    <div class="data-section">
+                        <h3>Input Format</h3>
+                        <div class="card card-body">
+                            {{ fetched_problem.input_format|linebreaksbr }}
+                        </div>
+                    </div>
+                {% endif %}
+                {% if fetched_problem.output_format %}
+                    <div class="data-section">
+                        <h3>Output Format</h3>
+                        <div class="card card-body">
+                            {{ fetched_problem.output_format|linebreaksbr }}
+                        </div>
+                    </div>
+                {% endif %}
+                {% if fetched_problem.notes %}
+                    <div class="data-section">
+                        <h3>Notes</h3>
+                        <div class="card card-body">
+                            {{ fetched_problem.notes|linebreaksbr }}
+                        </div>
+                    </div>
+                {% endif %}
+
+                <div class="button-group">
+                    <form method="post" style="display: inline;" id="migrate-db-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="problem_id" value="{{ problem_id }}">
+                        <input type="hidden" name="migrate_to_db" value="1">
+                        <input type="hidden" name="difficulty" id="difficulty-hidden" value="{{ difficulty|default:'' }}">
+                        <div id="hidden-tags-container">
+                            {% for tag_name in selected_tags %}
+                                <input type="hidden" name="tags" value="{{ tag_name }}">
+                            {% endfor %}
+                        </div>
+                        <button class="btn btn-warning" type="submit">Create/Update problem in Database</button>
+                    </form>
+
+                    <form method="post" style="display: inline;" id="migrate-azure-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="problem_id" value="{{ problem_id }}">
+                        <input type="hidden" name="migrate_to_azure" value="1">
+                        <button class="btn btn-success {% if not db_problem %}disabled{% endif %}" type="submit" {% if not db_problem %}disabled data-bs-toggle="tooltip" data-bs-placement="top" title="Please migrate the problem to the database first."{% endif %}>Migrate Test Cases to Azure</button>
+                    </form>
+                </div>
+                
+                {% if all_test_cases %}
+                <div class="data-section">
+                    <h3>All Test Cases ({{ all_test_cases|length }} total)</h3>
+                    <div class="table-responsive">
+                        <table class="table table-striped table-bordered">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>Index</th>
+                                    <th>Input</th>
+                                    <th>Output</th>
+                                    <th>Description</th>
+                                    <th>Sample Test Case</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for test_case in all_test_cases %}
+                                <tr>
+                                    <td><strong>{{ test_case.index }}</strong></td>
+                                    <td>
+                                        <code>{{ test_case.input_preview }}</code>
+                                        {% if test_case.full_input|length > 50 %}
+                                            <button class="btn btn-sm btn-outline-info ms-2" onclick="showFullContent('input-{{ test_case.index }}', '{{ test_case.full_input|escapejs }}')">View Full</button>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <code>{{ test_case.output_preview }}</code>
+                                        {% if test_case.full_output|length > 50 %}
+                                            <button class="btn btn-sm btn-outline-info ms-2" onclick="showFullContent('output-{{ test_case.index }}', '{{ test_case.full_output|escapejs }}')">View Full</button>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <span>{{ test_case.description_preview }}</span>
+                                        {% if test_case.full_description|length > 50 %}
+                                            <button class="btn btn-sm btn-outline-info ms-2" onclick="showFullContent('desc-{{ test_case.index }}', '{{ test_case.full_description|escapejs }}')">View Full</button>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if test_case.is_sample %}
+                                            <span>Yes</span>
+                                        {% else %}
+                                            <span>No</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Button after test cases -->
+                <div class="button-group">
+                    <form method="post" style="display: inline;" id="migrate-test-cases-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="problem_id" value="{{ problem_id }}">
+                        <input type="hidden" name="migrate_test_cases_to_db" value="1">
+                        <button class="btn btn-success {% if not db_problem %}disabled{% endif %}" type="submit" {% if not db_problem %}disabled data-bs-toggle="tooltip" data-bs-placement="top" title="Please migrate the problem to the database first."{% endif %}>Migrate Test Description to Database</button>
+                    </form>
+                </div>
+                {% endif %}
+                
+                <div class="data-section">
+                    <h3 style="position: relative;">Main Correct Solution (Test by submitting using this)
+                        <button class="btn btn-sm btn-outline-secondary" style="position: absolute; top: 0; right: 0; display: flex; align-items: center; gap: 4px;" onclick="copyMainSolution()" title="Copy to clipboard">
+                            <span style="font-size: 1.2em;">Copy</span>
+                        </button>
+                    </h3>
+                    {% if main_solution %}
+                        <pre id="main-solution-block"><code>{{ main_solution }}</code></pre>
+                        <script>
+                        function copyMainSolution() {
+                            const codeBlock = document.getElementById('main-solution-block').innerText;
+                            navigator.clipboard.writeText(codeBlock).then(function() {
+                            }, function(err) {
+                                alert('Failed to copy: ' + err);
+                            });
+                        }
+                        </script>
+                    {% else %}
+                        <div class="alert alert-warning">Please migrate the problem to the database first.</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if fetched_problem.constraints %}
+                <div class="data-section">
+                    <h3>Constraints</h3>
+                    <div class="card card-body">
+                        {{ fetched_problem.constraints|linebreaksbr }}
+                    </div>
+                </div>
+            {% endif %}
+            {% if fetched_problem.editorial %}
+                <div class="data-section">
+                    <h3>Editorial</h3>
+                    <div class="card card-body">
+                        {{ fetched_problem.editorial|linebreaksbr }}
+                    </div>
+                </div>
+            {% endif %}
+        {% endif %}
+
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    // Global variables
+    var allTags = {{ all_tags_json|safe }};
+    var selectedTags = new Set({{ selected_tags_json|safe }});
+    var searchInput, dropdown, selectedTagsSection, hiddenContainer;
+    
+    // Initialize the tags interface
+    document.addEventListener('DOMContentLoaded', function() {
+        // Initialize elements
+        searchInput = document.getElementById('tags-search-input');
+        dropdown = document.getElementById('tags-dropdown');
+        selectedTagsSection = document.getElementById('selected-tags-section');
+        hiddenContainer = document.getElementById('hidden-tags-container');
+        
+        // Set up event listeners ONLY IF the elements exist
+        if (searchInput) {
+            searchInput.addEventListener('input', handleSearch);
+            searchInput.addEventListener('focus', showDropdown);
+            searchInput.addEventListener('blur', function() {
+                setTimeout(hideDropdown, 200);
+            });
+        }
+        
+        // Initialize display if the section exists
+        if (selectedTagsSection) {
+            updateSelectedTagsDisplay();
+        }
+        
+        // Handle difficulty dropdown
+        var select = document.getElementById('difficulty-select');
+        var hidden = document.getElementById('difficulty-hidden');
+        if (select && hidden) {
+            select.addEventListener('change', function() {
+                hidden.value = select.value;
+            });
+            hidden.value = select.value;
+        }
+        
+        // Handle migrate to DB form
+        var migrateForm = document.getElementById('migrate-db-form');
+        if (migrateForm) {
+            migrateForm.addEventListener('submit', function(e) {
+                var difficultySelect = document.getElementById('difficulty-select');
+                if (difficultySelect && !difficultySelect.value) {
+                    e.preventDefault();
+                    alert('Please select a difficulty level before submitting.');
+                    difficultySelect.focus();
+                    return false;
+                }
+                updateHiddenInputs();
+                showLoading('Migrating to database...');
+            });
+        }
+        
+        // Handle fetch form submission to show loading
+        var fetchForm = document.getElementById('fetchForm');
+        if (fetchForm) {
+            fetchForm.addEventListener('submit', function(e) {
+                // This is the fix for the original spinner problem
+                e.preventDefault(); 
+                showLoading('Fetching problem data and test cases (may take 3-4 minutes)...');
+                setTimeout(() => fetchForm.submit(), 50);
+            });
+        }
+        
+        // Handle migrate to Azure form
+        var azureForm = document.getElementById('migrate-azure-form');
+        if (azureForm) {
+            azureForm.addEventListener('submit', function() {
+                showLoading('Migrating to Azure...');
+            });
+        }
+        
+        // Handle migrate test cases to database form
+        var testCasesForm = document.getElementById('migrate-test-cases-form');
+        if (testCasesForm) {
+            testCasesForm.addEventListener('submit', function() {
+                showLoading('Migrating test cases to database...');
+            });
+        }
+        
+        // Hide loading if page loads with results (indicating successful fetch)
+        {% if fetched_problem or error or success or db_success %}
+            hideLoading();
+        {% endif %}
+    });
+    
+    // Show loading overlay
+    function showLoading(message) {
+        var overlay = document.getElementById('loadingOverlay');
+        var loadingText = document.querySelector('.loading-text');
+        if (overlay) {
+            if (loadingText && message) {
+                loadingText.textContent = message;
+            }
+            overlay.style.display = 'flex';
+        }
+    }
+    
+    // Hide loading overlay
+    function hideLoading() {
+        var overlay = document.getElementById('loadingOverlay');
+        if (overlay) {
+            overlay.style.display = 'none';
+        }
+    }
+    
+    // Handle search input
+    function handleSearch() {
+        var query = searchInput.value.toLowerCase().trim();
+        var filteredTags = [];
+        
+        if (query) {
+            // Filter existing tags
+            allTags.forEach(function(tag) {
+                if (tag.fields.name.toLowerCase().includes(query)) {
+                    filteredTags.push({
+                        name: tag.fields.name,
+                        id: tag.pk,
+                        isExisting: true
+                    });
+                }
+            });
+            
+            // Add "Add new tag" option if query doesn't match any existing tag
+            var exactMatch = filteredTags.some(function(tag) {
+                return tag.name.toLowerCase() === query;
+            });
+            
+            if (!exactMatch && query.length > 0) {
+                filteredTags.push({
+                    name: query,
+                    id: null,
+                    isExisting: false
+                });
+            }
+        } else {
+            // Show all existing tags when search is empty
+            allTags.forEach(function(tag) {
+                filteredTags.push({
+                    name: tag.fields.name,
+                    id: tag.pk,
+                    isExisting: true
+                });
+            });
+        }
+        
+        populateDropdown(filteredTags);
+        showDropdown();
+    }
+    
+    // Populate dropdown with filtered tags
+    function populateDropdown(tags) {
+        dropdown.innerHTML = '';
+        
+        if (tags.length === 0) {
+            dropdown.innerHTML = '<div class="tag-option"><span class="text-muted">No tags found</span></div>';
+            return;
+        }
+        
+        tags.forEach(function(tag) {
+            var option = document.createElement('div');
+            option.className = 'tag-option';
+            
+            var checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = selectedTags.has(tag.name);
+            checkbox.addEventListener('change', function() {
+                toggleTag(tag.name);
+            });
+            
+            var label = document.createElement('span');
+            label.className = tag.isExisting ? 'tag-name' : 'tag-name add-new-tag';
+            label.textContent = tag.isExisting ? tag.name : 'Add "' + tag.name + '"';
+            
+            option.appendChild(checkbox);
+            option.appendChild(label);
+            
+            // Add click handler for the entire option
+            option.addEventListener('click', function(e) {
+                if (e.target !== checkbox) {
+                    checkbox.checked = !checkbox.checked;
+                    toggleTag(tag.name);
+                }
+            });
+            
+            dropdown.appendChild(option);
+        });
+    }
+    
+    // Toggle tag selection
+    function toggleTag(tagName) {
+        if (selectedTags.has(tagName)) {
+            selectedTags.delete(tagName);
+        } else {
+            selectedTags.add(tagName);
+        }
+        updateSelectedTagsDisplay();
+    }
+    
+    // Update the selected tags display
+    function updateSelectedTagsDisplay() {
+        selectedTagsSection.innerHTML = '';
+        
+        if (selectedTags.size === 0) {
+            selectedTagsSection.innerHTML = '<span class="text-muted">No tags selected</span>';
+            return;
+        }
+        
+        selectedTags.forEach(function(tagName) {
+            var tagElement = document.createElement('span');
+            tagElement.className = 'selected-tag-item';
+            tagElement.innerHTML = tagName + '<span class="remove-tag" onclick="removeTag(\'' + tagName + '\')">&times;</span>';
+            selectedTagsSection.appendChild(tagElement);
+        });
+    }
+    
+    // Remove a tag
+    function removeTag(tagName) {
+        selectedTags.delete(tagName);
+        updateSelectedTagsDisplay();
+        updateHiddenInputs();
+        
+        // Update dropdown checkboxes
+        var checkboxes = dropdown.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(function(checkbox) {
+            var label = checkbox.nextElementSibling;
+            if (label.textContent === tagName || label.textContent === 'Add "' + tagName + '"') {
+                checkbox.checked = false;
+            }
+        });
+    }
+    
+    // Update hidden inputs for form submission
+    function updateHiddenInputs() {
+        hiddenContainer.innerHTML = '';
+        selectedTags.forEach(function(tagName) {
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'tags';
+            input.value = tagName;
+            hiddenContainer.appendChild(input);
+        });
+    }
+    
+    // Show dropdown
+    function showDropdown() {
+        if (dropdown.children.length > 0) {
+            dropdown.style.display = 'block';
+        }
+    }
+    
+    // Hide dropdown
+    function hideDropdown() {
+        dropdown.style.display = 'none';
+    }
+    
+    // Show full content in a modal
+    function showFullContent(type, content) {
+        // Create modal if it doesn't exist
+        var modal = document.getElementById('contentModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.className = 'modal fade';
+            modal.id = 'contentModal';
+            modal.innerHTML = `
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="modalTitle">Full Content</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <pre id="modalContent" style="max-height: 400px; overflow-y: auto;"></pre>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                            <button type="button" class="btn btn-primary" onclick="copyModalContent()">Copy to Clipboard</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+        
+        // Set content and show modal
+        document.getElementById('modalContent').textContent = content;
+        document.getElementById('modalTitle').textContent = type.charAt(0).toUpperCase() + type.slice(1) + ' Content';
+        
+        var modalInstance = new bootstrap.Modal(modal);
+        modalInstance.show();
+    }
+    
+    // Copy modal content to clipboard
+    function copyModalContent() {
+        const content = document.getElementById('modalContent').textContent;
+        navigator.clipboard.writeText(content).then(function() {
+            // Show success message
+            var copyBtn = document.querySelector('#contentModal .btn-primary');
+            var originalText = copyBtn.textContent;
+            copyBtn.textContent = 'Copied!';
+            copyBtn.classList.remove('btn-primary');
+            copyBtn.classList.add('btn-success');
+            
+            setTimeout(function() {
+                copyBtn.textContent = originalText;
+                copyBtn.classList.remove('btn-success');
+                copyBtn.classList.add('btn-primary');
+            }, 2000);
+        }).catch(function(err) {
+            alert('Failed to copy: ' + err);
+        });
+    }
+    </script>
+</body>
+</html>
