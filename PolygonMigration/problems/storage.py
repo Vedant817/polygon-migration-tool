@@ -245,8 +245,10 @@ class S3BlobStorage(BlobStorage):
 
         kwargs = {"Bucket": self.container}
         region = getattr(self.client, "meta", None) and self.client.meta.region_name
-        if region and region != "us-east-1":
-            # us-east-1 must not carry a LocationConstraint; other regions must.
+        if region and region not in ("us-east-1", "auto"):
+            # us-east-1 must not carry a LocationConstraint, other real regions must.
+            # "auto" is the convention Cloudflare R2 requires, and R2 rejects any
+            # LocationConstraint outright, so nothing is sent for it.
             kwargs["CreateBucketConfiguration"] = {"LocationConstraint": region}
         try:
             self.client.create_bucket(**kwargs)

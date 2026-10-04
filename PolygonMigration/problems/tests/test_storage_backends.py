@@ -102,6 +102,75 @@ class S3BackendTests(SimpleTestCase):
         self.assertEqual(build_test_case_key(12, 11, is_answer=True), "test_cases/12/11.a")
 
 
+class S3EnsureContainerTests(SimpleTestCase):
+    """Bucket creation must match the provider's CreateBucket expectations."""
+
+    def _client(self, region):
+        import boto3
+        from botocore.config import Config
+        return boto3.client("s3", aws_access_key_id="k", aws_secret_access_key="s",
+                            region_name=region,
+                            config=Config(s3={"addressing_style": "path"}))
+
+    def _store(self, region):
+        store = S3BlobStorage.__new__(S3BlobStorage)
+        store.container = "testcases"
+        store.client = self._client(region)
+        return store
+
+    def _capture_create_bucket(self, store, expected_params=None):
+        """Queue a 404 for head_bucket, then capture the create_bucket call."""
+        from botocore.stub import Stubber
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_response("create_bucket", {},
+                             expected_params if expected_params is not None else {})
+        stubber.activate()
+        store.ensure_container()
+        return stubber
+
+    def test_r2_auto_region_sends_no_location_constraint(self):
+        """Cloudflare R2 uses region 'auto' and rejects any LocationConstraint."""
+        store = self._store("auto")
+        stubber = self._capture_create_bucket(store, {"Bucket": "testcases"})
+        stubber.assert_no_pending_responses()
+
+    def test_us_east_1_sends_no_location_constraint(self):
+        store = self._store("us-east-1")
+        stubber = self._capture_create_bucket(store, {"Bucket": "testcases"})
+        stubber.assert_no_pending_responses()
+
+    def test_real_region_sends_its_location_constraint(self):
+        store = self._store("eu-west-1")
+        stubber = self._capture_create_bucket(
+            store, {"Bucket": "testcases",
+                    "CreateBucketConfiguration": {"LocationConstraint": "eu-west-1"}})
+        stubber.assert_no_pending_responses()
+
+    def test_existing_bucket_is_not_recreated(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_response("head_bucket", {}, {"Bucket": "testcases"})
+        stubber.activate()
+        store.ensure_container()          # must not consume any create_bucket response
+        stubber.assert_no_pending_responses()
+
+    def test_already_owned_bucket_is_not_an_error(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_client_error("create_bucket",
+                                 service_error_code="BucketAlreadyOwnedByYou",
+                                 service_message="owned", http_status_code=409)
+        stubber.activate()
+        store.ensure_container()          # must not raise
+        stubber.assert_no_pending_responses()
+
+
 class AzureBackendTests(SimpleTestCase):
     """Azure SDK calls are mocked; the contract (keys, error wrapping) is asserted."""
 
