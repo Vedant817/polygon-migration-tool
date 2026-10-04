@@ -1,5 +1,6 @@
 from django.shortcuts import render
 from .polygon_api import PolygonAPI
+from .html_sanitize import sanitize_html
 from .storage import BlobStorageError, build_problem_prefix, get_storage
 from .models import Problem, SampleTestCase, ProblemTestCase, ProblemTag
 from django.utils.text import slugify
@@ -318,22 +319,25 @@ def index(request):
                     
                     # Store fetched data in context for display (without database operations)
                     notes = html_data['notes']
+                    # Display copies are filtered; the originals below are what
+                    # gets written to the database, so the stored HTML stays
+                    # byte-for-byte what Polygon returned.
                     context['fetched_problem'] = {
                         'polygon_id': polygon_id,
                         'title': title,
                         'slug': slug,
                         'difficulty': difficulty,
-                        'problem_statement': problem_statement,
-                        'input_format': input_format,
-                        'output_format': output_format,
-                        'constraints': constraints,
-                        'editorial': editorial,
+                        'problem_statement': sanitize_html(problem_statement),
+                        'input_format': sanitize_html(input_format),
+                        'output_format': sanitize_html(output_format),
+                        'constraints': sanitize_html(constraints),
+                        'editorial': sanitize_html(editorial),
                         'time_limit': time_limit,
                         'memory_limit': memory_limit,
                         'checker_type': checker_type,
                         'custom_checker_info': custom_checker_info,
                         'test_case_count': test_case_count,
-                        'notes': notes,
+                        'notes': sanitize_html(notes),
                     }
                     
                     # Handle database migration

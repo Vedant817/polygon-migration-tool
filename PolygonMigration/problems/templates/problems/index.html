@@ -5,6 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polygon Problem Extractor</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Codeforces writes maths as $$$x$$$ inline and $$x$$ displayed. Without a
+         renderer those delimiters reach the reader as literal text. Configured
+         before the script loads, and pre/code are skipped so the reference
+         solution is never treated as maths. -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$$$', '$$$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            },
+            options: {
+                skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+            }
+        };
+    </script>
+    <script id="MathJax-script" async
+            src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <style>
         body { padding: 0; margin: 0; }
         .data-section { margin-top: 2rem; }
@@ -20,18 +37,23 @@
         /* New styles for search-based multiselect */
         .tags-search-container { position: relative; }
         .tags-search-input { width: 100%; padding: 0.5rem; border: 1px solid #ced4da; border-radius: 0.375rem; }
-        .tags-dropdown { position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ced4da; border-top: none; border-radius: 0 0 0.375rem 0.375rem; max-height: 200px; overflow-y: auto; z-index: 1000; display: none; }
+        .tags-dropdown { position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ced4da; border-top: none; border-radius: 0 0 0.375rem 0.375rem; max-height: 200px; overflow-y: auto; z-index: 1000; display: none; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18); }
         .tag-option { display: flex; align-items: center; padding: 0.5rem; cursor: pointer; border-bottom: 1px solid #f8f9fa; }
         .tag-option:hover { background-color: #f8f9fa; }
         .tag-option input[type="checkbox"] { margin-right: 0.5rem; }
         .tag-option .tag-name { flex: 1; }
         .tag-option .add-new-tag { color: #28a745; font-weight: bold; }
-        .selected-tags-section { margin-top: 1rem; }
+        .selected-tags-section { margin-bottom: 0.5rem; }
         /* #007bff with white text is 3.98:1 and fails WCAG AA (4.5:1). #0b5ed7 is the
            same hue at 5.84:1 and keeps the chip visually identical */
         .selected-tag-item { display: inline-flex; align-items: center; background-color: #0b5ed7; color: white; padding: 0.25rem 0.5rem; margin: 0.125rem; border-radius: 0.25rem; font-size: 0.875rem; }
         .remove-tag { margin-left: 0.5rem; cursor: pointer; color: #fff; background: none; border: 0; padding: 0; font-size: 1rem; line-height: 1; }
         .remove-tag:hover { color: #ffc107; }
+        /* heading + action on one line that wraps, instead of an absolutely
+           positioned button that sat on top of the wrapped heading text */
+        .section-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-start; justify-content: space-between; }
+        .section-head .copy-btn { flex: 0 0 auto; }
+
         /* keyboard users must be able to reach and see the tag list */
         .remove-tag:focus-visible { outline: 2px solid #fff; outline-offset: 1px; border-radius: 2px; }
         
@@ -197,6 +219,10 @@
                     </tr>
                     <tr><th>Tags</th>
                         <td>
+                            <div class="selected-tags-section" id="selected-tags-section" aria-live="polite">
+                                <!-- chosen tags sit above the input so the suggestion
+                                     list, which opens downwards, never covers them -->
+                            </div>
                             <div class="tags-search-container">
                                 <input type="text" class="tags-search-input" id="tags-search-input" placeholder="Search for tags or type to add new..." autocomplete="off"
                                        role="combobox" aria-expanded="false" aria-controls="tags-dropdown"
@@ -204,9 +230,6 @@
                                 <div class="tags-dropdown" id="tags-dropdown" role="listbox" aria-label="Tag suggestions">
                                     <!-- Tag options will be populated here -->
                                 </div>
-                            </div>
-                            <div class="selected-tags-section" id="selected-tags-section" aria-live="polite">
-                                <!-- Selected tags will be displayed here -->
                             </div>
                         </td>
                     </tr>
@@ -224,7 +247,7 @@
                     <div class="data-section">
                         <h3>Problem Statement (Legend)</h3>
                         <div class="card card-body">
-                            {{ fetched_problem.problem_statement|linebreaksbr }}
+                            {{ fetched_problem.problem_statement|safe }}
                         </div>
                     </div>
                 {% endif %}
@@ -232,7 +255,7 @@
                     <div class="data-section">
                         <h3>Input Format</h3>
                         <div class="card card-body">
-                            {{ fetched_problem.input_format|linebreaksbr }}
+                            {{ fetched_problem.input_format|safe }}
                         </div>
                     </div>
                 {% endif %}
@@ -240,7 +263,7 @@
                     <div class="data-section">
                         <h3>Output Format</h3>
                         <div class="card card-body">
-                            {{ fetched_problem.output_format|linebreaksbr }}
+                            {{ fetched_problem.output_format|safe }}
                         </div>
                     </div>
                 {% endif %}
@@ -248,7 +271,7 @@
                     <div class="data-section">
                         <h3>Notes</h3>
                         <div class="card card-body">
-                            {{ fetched_problem.notes|linebreaksbr }}
+                            {{ fetched_problem.notes|safe }}
                         </div>
                     </div>
                 {% endif %}
@@ -267,11 +290,11 @@
                         <button class="btn btn-warning" type="submit">Create/Update problem in Database</button>
                     </form>
 
-                    <form method="post" style="display: inline;" id="migrate-azure-form">
+                    <form method="post" style="display: inline;" id="migrate-storage-form">
                         {% csrf_token %}
                         <input type="hidden" name="problem_id" value="{{ problem_id }}">
                         <input type="hidden" name="migrate_to_azure" value="1">
-                        <button class="btn btn-success {% if not db_problem %}disabled{% endif %}" type="submit" {% if not db_problem %}disabled data-bs-toggle="tooltip" data-bs-placement="top" title="Please migrate the problem to the database first."{% endif %}>Migrate Test Cases to Azure</button>
+                        <button class="btn btn-success {% if not db_problem %}disabled{% endif %}" type="submit" {% if not db_problem %}disabled data-bs-toggle="tooltip" data-bs-placement="top" title="Please migrate the problem to the database first."{% endif %}>Migrate Test Cases to Cloud Storage</button>
                     </form>
                 </div>
                 
@@ -337,11 +360,11 @@
                 {% endif %}
                 
                 <div class="data-section">
-                    <h3 style="position: relative;">Main Correct Solution (Test by submitting using this)
-                        <button class="btn btn-sm btn-outline-secondary" style="position: absolute; top: 0; right: 0; display: flex; align-items: center; gap: 4px;" onclick="copyMainSolution()" title="Copy to clipboard">
-                            <span style="font-size: 1.2em;">Copy</span>
-                        </button>
-                    </h3>
+                    <div class="section-head">
+                        <h3 class="mb-0">Main Correct Solution (Test by submitting using this)</h3>
+                        <button class="btn btn-sm btn-outline-secondary copy-btn" type="button" onclick="copyMainSolution()"
+                                title="Copy to clipboard" aria-label="Copy the reference solution to the clipboard">Copy</button>
+                    </div>
                     {% if main_solution %}
                         <pre id="main-solution-block"><code>{{ main_solution }}</code></pre>
                         <script>
@@ -363,7 +386,7 @@
                 <div class="data-section">
                     <h3>Constraints</h3>
                     <div class="card card-body">
-                        {{ fetched_problem.constraints|linebreaksbr }}
+                        {{ fetched_problem.constraints|safe }}
                     </div>
                 </div>
             {% endif %}
@@ -371,7 +394,7 @@
                 <div class="data-section">
                     <h3>Editorial</h3>
                     <div class="card card-body">
-                        {{ fetched_problem.editorial|linebreaksbr }}
+                        {{ fetched_problem.editorial|safe }}
                     </div>
                 </div>
             {% endif %}
@@ -398,20 +421,28 @@
         if (searchInput) {
             searchInput.addEventListener('input', handleSearch);
             searchInput.addEventListener('focus', showDropdown);
-            searchInput.addEventListener('blur', function() {
-                // The old unconditional 200ms hide made the list unreachable by
-                // keyboard: tabbing off the input blurred it, the timer fired,
-                // and the options were display:none before Enter could be
-                // pressed, dropping focus back to <body>. Wait, then keep the
-                // list open if focus actually moved into it.
-                setTimeout(function() {
-                    var active = document.activeElement;
-                    if (dropdown && active && dropdown.contains(active)) { return; }
-                    hideDropdown();
-                }, 200);
-            });
+
+            // Close on focus leaving the whole widget, not on the input's blur.
+            // The original unconditional 200ms hide made the list unreachable by
+            // keyboard: tabbing off the input blurred it, the timer fired, and
+            // the options were display:none before Enter could be pressed, so
+            // focus fell back to <body>. Watching focusout on the container means
+            // focus moving *within* the widget - input to option - never closes
+            // it, and only genuinely leaving the widget does.
+            var tagWidget = searchInput.closest('.tags-search-container');
+            var widgetRoot = tagWidget && tagWidget.parentElement
+                ? tagWidget.parentElement : tagWidget;
+            if (widgetRoot) {
+                widgetRoot.addEventListener('focusout', function() {
+                    setTimeout(function() {
+                        var active = document.activeElement;
+                        if (active && widgetRoot.contains(active)) { return; }
+                        hideDropdown();
+                    }, 0);
+                });
+            }
             searchInput.addEventListener('keydown', function(e) {
-                if (e.key === 'Escape') { hideDropdown(); }
+                if (e.key === 'Escape') { hideDropdown(); searchInput.focus(); }
             });
         }
         
@@ -457,11 +488,11 @@
             });
         }
         
-        // Handle migrate to Azure form
+        // Handle the cloud-storage upload form
         var azureForm = document.getElementById('migrate-azure-form');
         if (azureForm) {
             azureForm.addEventListener('submit', function() {
-                showLoading('Migrating to Azure...');
+                showLoading('Migrating to cloud storage...');
             });
         }
         

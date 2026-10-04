@@ -175,6 +175,70 @@ class FetchProblemTests(MigrationTestBase):
                          "weird_checker.cpp")
 
 
+class ProblemContentSanitisationTests(MigrationTestBase):
+    """The statement is remote HTML, so it is filtered before it reaches the page.
+
+    Rendering it escaped showed literal ``<p>`` tags to the user; rendering it
+    with ``|safe`` unfiltered would execute whatever the problem contains.
+    """
+
+    HOSTILE_HTML = (
+        '<div class="legend">'
+        '<div class="section-title">Problem</div>'
+        '<p>Given <b>a</b> and <b>b</b>.</p>'
+        '<script>window.stolen = 1;</script>'
+        '<p onclick="window.stolen = 2">click</p>'
+        '<a href="javascript:window.stolen=3">go</a>'
+        '</div>'
+    )
+
+    def _post_with_legend(self, legend_html):
+        html = ('<html><body><div class="title">Probe Sum</div>'
+                f'<div class="legend">{legend_html}</div>'
+                '<div class="input-specification">'
+                '<div class="section-title">Input</div><p>Two ints.</p></div>'
+                '<div class="output-specification">'
+                '<div class="section-title">Output</div><p>The sum.</p></div>'
+                '</body></html>')
+        self.use(stub.PolygonStub(tests=stub.default_tests(), problem_html=html))
+        return self.post()
+
+    def test_script_and_handlers_never_reach_the_rendered_page(self):
+        response = self._post_with_legend(self.HOSTILE_HTML)
+        self.assertEqual(response.status_code, 200)
+        statement = response.context["fetched_problem"]["problem_statement"]
+        self.assertNotIn("script", statement.lower())
+        self.assertNotIn("onclick", statement.lower())
+        self.assertNotIn("javascript:", statement.lower())
+        self.assertIn("Given", statement)
+
+    def test_meaningful_markup_is_preserved(self):
+        response = self._post_with_legend(self.HOSTILE_HTML)
+        statement = response.context["fetched_problem"]["problem_statement"]
+        self.assertIn("<b>a</b>", statement)
+
+    def test_rendered_html_shows_formatting_not_literal_tags(self):
+        response = self._post_with_legend(
+            '<p>Print <code>a+b</code> on one line.</p>')
+        html = response.content.decode()
+        self.assertIn("<code>a+b</code>", html)
+        self.assertNotIn("&lt;code&gt;", html)
+
+    def test_database_keeps_the_original_unsanitised_html(self):
+        """Display is filtered; the migration target must stay lossless."""
+        html = ('<html><body><div class="title">Probe Sum</div>'
+                f'<div class="legend">{self.HOSTILE_HTML}</div>'
+                '<div class="input-specification">'
+                '<div class="section-title">Input</div><p>Two ints.</p></div>'
+                '<div class="output-specification">'
+                '<div class="section-title">Output</div><p>The sum.</p></div>'
+                '</body></html>')
+        self.use(stub.PolygonStub(tests=stub.default_tests(), problem_html=html))
+        self.post(migrate_to_db="1", difficulty="easy", tags=TAGS)
+        stored = Problem.objects.get(polygon_id=self.polygon_id)
+        self.assertIn("window.stolen", stored.problem_statement)
+
+
 class MigrateProblemTests(MigrationTestBase):
     def test_problem_is_persisted_with_difficulty_and_tags(self):
         self.use(stub.PolygonStub(tests=stub.default_tests()))
