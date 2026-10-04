@@ -254,9 +254,26 @@ class S3BlobStorage(BlobStorage):
             self.client.create_bucket(**kwargs)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code")
-            if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
-                raise BlobStorageError(
-                    f"S3 bucket {self.container!r} could not be created: {exc}") from exc
+            if code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                return
+            if "CreateBucketConfiguration" in kwargs:
+                # Backblaze B2 and some other S3-compatible endpoints derive the
+                # region from the endpoint URL and reject the constraint. Retry
+                # once without it rather than failing the whole migration.
+                logger.info("Retrying create_bucket without a LocationConstraint for %r",
+                            self.container)
+                try:
+                    self.client.create_bucket(Bucket=self.container)
+                    return
+                except ClientError as retry_exc:
+                    retry_code = retry_exc.response.get("Error", {}).get("Code")
+                    if retry_code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                        return
+                    raise BlobStorageError(
+                        f"S3 bucket {self.container!r} could not be created: {retry_exc}"
+                    ) from retry_exc
+            raise BlobStorageError(
+                f"S3 bucket {self.container!r} could not be created: {exc}") from exc
 
     def upload_bytes(self, key, data):
         try:

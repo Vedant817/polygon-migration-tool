@@ -157,6 +157,38 @@ class S3EnsureContainerTests(SimpleTestCase):
         store.ensure_container()          # must not consume any create_bucket response
         stubber.assert_no_pending_responses()
 
+    def test_location_constraint_rejection_is_retried_without_it(self):
+        """Backblaze B2 derives region from the endpoint and rejects the constraint."""
+        from botocore.stub import Stubber
+        store = self._store("us-east-005")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_client_error(
+            "create_bucket",
+            service_error_code="IllegalLocationConstraintException",
+            service_message="The specified location constraint is not valid",
+            http_status_code=400,
+            expected_params={"Bucket": "testcases",
+                             "CreateBucketConfiguration":
+                                 {"LocationConstraint": "us-east-005"}})
+        stubber.add_response("create_bucket", {}, {"Bucket": "testcases"})
+        stubber.activate()
+        store.ensure_container()          # must not raise
+        stubber.assert_no_pending_responses()
+
+    def test_create_bucket_failure_without_constraint_still_raises(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_client_error("create_bucket", service_error_code="AccessDenied",
+                                 service_message="no", http_status_code=403)
+        stubber.activate()
+        with self.assertRaises(BlobStorageError):
+            store.ensure_container()
+
     def test_already_owned_bucket_is_not_an_error(self):
         from botocore.stub import Stubber
         store = self._store("auto")
