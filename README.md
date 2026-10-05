@@ -34,13 +34,15 @@ Set `STORAGE_PROVIDER` in `.env`:
 | `STORAGE_PROVIDER` | Backend | Extra configuration |
 |---|---|---|
 | `azure` | `AzureBlobStorage` (azure-storage-blob) | `AZURE_STORAGE_ACCOUNT_URL`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_USERNAME`, `AZURE_PASSWORD` |
-| `s3` | `S3BlobStorage` (boto3) | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_REGION_NAME`, optional `S3_ENDPOINT_URL` (Cloudflare R2 / MinIO) |
+| `s3` | `S3BlobStorage` (boto3) | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_REGION_NAME`, optional `S3_ENDPOINT_URL` (Cloudflare R2 / Backblaze B2 / MinIO) |
 | `local` | `LocalBlobStorage` (filesystem) | `STORAGE_LOCAL_DIR` - for running the flow without cloud credentials |
 
 `STORAGE_CONTAINER_NAME` names the container / bucket / folder for all of them.
 
-To add a provider: subclass `BlobStorage` (`problems/storage.py`), implement `ensure_container`,
-`upload_bytes`, `delete_prefix`, `list_keys` and `read_bytes`, then register it in `get_storage()`.
+To add a provider: subclass `BlobStorage` (`problems/storage.py`), implement
+`ensure_container`, `upload_bytes`, `upload_text`, `delete_prefix`, `list_keys`, `read_bytes` and
+`read_text`, then register it in `get_storage()`. `upload_test_case` and the key builders are
+inherited, so the object layout stays correct without any work on your side.
 
 ## Workflow
 1. **Login:** Staff users log in via `/users/login/` using their email and password.
@@ -132,6 +134,10 @@ python manage.py migrate
 python manage.py createsuperuser
 ```
 
+`createsuperuser` asks for `contact_number`, `college`, `graduation_year` and `gender` because
+they are listed in `users.User.REQUIRED_FIELDS`. There is no `--noinput` shortcut that skips
+them, so a scripted superuser has to supply all four.
+
 ### 8. Collect Static Files (for production)
 ```bash
 python manage.py collectstatic
@@ -148,8 +154,22 @@ Access the app at [http://localhost:8000/](http://localhost:8000/)
 ```bash
 python manage.py test
 ```
-Tests run against a throwaway PostgreSQL database. Tests that need cloud storage or a live Polygon
-account skip themselves automatically when those are unavailable.
+Tests run against a throwaway PostgreSQL database, so they need `DB_*` pointing at a live server.
+PostgreSQL specifically, not SQLite: the duplicate-slug behaviour under test is enforced by a
+unique constraint whose semantics differ between engines.
+
+Tests that need cloud storage or a live Polygon account skip themselves cleanly when those are
+unavailable, so the suite still runs on a machine with no credentials.
+
+## Further reading
+
+`DOCUMENTATION.md` traces each of the five user flows from the browser through the backend to
+PostgreSQL, Redis, the Polygon API and object storage, and explains the Polygon signing scheme and
+the storage naming rules. `ISSUES.md` lists the six issues worth prioritising, ranked, plus answers
+to four edge cases.
+
+One note if you run this offline: the page loads Bootstrap and MathJax from a CDN. Everything still
+works without them, but the styling and the typeset maths will not render.
 
 ## Usage
 - **Login:** Go to `/users/login/` and log in as a staff user.
@@ -186,7 +206,7 @@ account skip themselves automatically when those are unavailable.
 | `AZURE_CLIENT_ID`         | Azure AD application client ID              |
 | `AZURE_USERNAME`          | Azure username                              |
 | `AZURE_PASSWORD`          | Azure password                              |
-| `S3_ENDPOINT_URL`         | S3 endpoint (empty for AWS; set for R2/MinIO)|
+| `S3_ENDPOINT_URL`         | S3 endpoint (empty for AWS; set for R2/B2/MinIO)|
 | `S3_ACCESS_KEY_ID`        | S3 access key                               |
 | `S3_SECRET_ACCESS_KEY`    | S3 secret key                               |
 | `S3_REGION_NAME`          | S3 region                                   |
@@ -197,13 +217,20 @@ account skip themselves automatically when those are unavailable.
 ```
 Polygon-migration-assignment/
 ├── requirement.txt         # Python dependencies
+├── README.md               # This file
+├── DOCUMENTATION.md        # How the user flows reach the backend and services
+├── ISSUES.md               # Prioritised product and code issues, plus edge cases
+├── ISSUES_TEMPLATE.md      # The template ISSUES.md was written from
 └── PolygonMigration/
     ├── .env.example        # Environment template
     ├── manage.py
     ├── problems/           # Polygon client, models, migration view, storage
     │   ├── polygon_api.py  # Polygon API client + Redis test-case cache
     │   ├── storage.py      # Cloud storage abstraction (azure / s3 / local)
+    │   ├── html_sanitize.py# Allow-list filter for remote problem content
     │   ├── views.py        # Single migration view handling all POST actions
+    │   ├── models.py       # Problem, SampleTestCase, ProblemTestCase, ProblemTag
+    │   ├── migrations/     # Schema, including the one the starter was missing
     │   └── tests/          # Automated tests
     ├── users/              # Custom user model and authentication
     ├── contents/           # Topic and content management

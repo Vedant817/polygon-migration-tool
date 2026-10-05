@@ -11,7 +11,7 @@
 | Product Issues | 0 | 2 | 1 | 0 | 3 |
 | Code Issues | 0 | 1 | 2 | 0 | 3 |
 
-All six findings below were confirmed against the running application with PostgreSQL 15, Redis 7 and Backblaze B2. Where I state that behaviour was tested, I ran it; where I state it was read from code, I say so.
+Everything below was run against the real stack (PostgreSQL 15, Redis 7, Backblaze B2) rather than reasoned about from the source. Where I say something was tested, I tested it. Where I am explaining the mechanism, that is me reading the code, and I say so.
 
 ---
 
@@ -19,14 +19,15 @@ All six findings below were confirmed against the running application with Postg
 
 > Product issues are user-facing problems: broken functionality, missing validation, poor UX, data integrity risks visible to users.
 
-### [P1] Re-migrating a problem never removes test cases that were deleted on Polygon, and reports success
+### [P1] Re-migrating a problem never removes test cases the setter deleted, and it reports success
 
 **Severity**: High
 
-**Location**: `problems/views.py:528-556` (the `migrate_test_cases_to_db` branch), surfaced to the user by `problems/templates/problems/index.html`
+**Location**: `problems/views.py:528-556`, in the `migrate_test_cases_to_db` branch
 
 **Description**:
-The test case migration loop iterates over the test cases that were just fetched and updates or creates one row per test, matching existing rows by list position:
+
+The migration walks the test cases it just fetched and writes one row each, matching what is already there by list position:
 
 ```python
 existing_test_cases = list(ProblemTestCase.objects.filter(problem=problem_obj).order_by('order'))
@@ -40,36 +41,40 @@ for idx, test in enumerate(test_cases):
         ProblemTestCase.objects.create(...)
 ```
 
-Nothing ever removes rows beyond `len(test_cases)`. If a problem is migrated with 20 tests and the setter later deletes 8 on Polygon, a re-migration rewrites the first 12 rows and leaves rows 13 to 20 exactly as they were. The request then reports "Test cases description migrated to database Successfully."
+Nothing removes rows past `len(test_cases)`. So if a problem is migrated with 20 tests and the setter later deletes 8, the re-migration rewrites rows 1 to 12 and walks away. Rows 13 to 20 keep the content of tests that no longer exist.
 
 **Impact**:
-- The database ends up holding 20 test cases while the problem has 12, and the UI reports success.
-- The 8 survivors are not merely stale duplicates, they hold the content of tests that no longer exist, so anyone reading the database gets test data that the setter has withdrawn.
-- Because these rows drive judging, students could be graded against tests that were deliberately removed.
-- The problem is invisible. There is no warning, no count of removed rows and no difference in the success message, so nothing prompts an operator to look.
-- The object storage copy is cleaned up correctly, which makes the inconsistency worse: storage holds 12 test cases while the database holds 20.
+
+I ran this deliberately. After re-migrating a 20 test problem down to 12, the table still held 20 rows, zero had been deleted, and the eight survivors were byte for byte the tests the setter had withdrawn. The UI said "Test cases description migrated to database Successfully."
+
+The part that bothers me most is that those eight rows are not merely redundant, they are wrong. Someone reading the database gets test data the setter chose to remove. If those tests drive judging, students get graded on them.
+
+Then there is the silence. No warning, no count, no difference in the success message. Nothing prompts anyone to go looking.
+
+Worth noting that object storage is handled correctly and holds only 12. That makes it worse rather than better: the bucket and the database now disagree, and the database is the one that is wrong.
 
 **Suggested Fix**:
-Delete rows whose `order` exceeds the number of fetched tests, or delete and rewrite the whole set inside the transaction. Report the number of removed rows in the success message so the operator can see what changed:
+
+Delete anything past the end of the fetched set, or drop and rewrite the whole set inside the transaction, then say how many rows went away so the change is visible:
 
 ```python
-surplus = existing_test_cases[len(test_cases):]
-for row in surplus:
+for row in existing_test_cases[len(test_cases):]:
     row.delete()
 ```
 
-**Why this priority**: It is the only finding that produces confidently wrong data while telling the user everything worked. It is silent, it survives re-runs, and it affects the output the tool exists to produce. I have not seen a symptom of the other five issues that is harder to notice or harder to recover from.
+**Why this rank**: it is the only one of the six that produces confidently wrong data while telling the user everything went fine. It is silent, it survives repeat runs, and it sits on the output the tool exists to produce. Nothing else here is harder to notice or harder to unpick later.
 
 ---
 
-### [P2] Database copies of test data are silently truncated to 260 characters
+### [P2] Database copies of the test data are quietly truncated to 260 characters
 
 **Severity**: High
 
 **Location**: `problems/views.py:537-539`
 
 **Description**:
-Before writing a test case row, the input and output are reduced to 260 characters and right stripped:
+
+Before a row is written:
 
 ```python
 # Truncate input and output to first 260 bytes
@@ -77,46 +82,52 @@ truncated_input = input_data[:260]
 truncated_output = output_data[:260]
 ```
 
-The comment says bytes, but Python slicing on `str` truncates by character. Nothing in the template, the success message or the database records that the stored value is a prefix of the real test.
+The comment says bytes. It is characters, since these are `str`. Either way, anything past 260 goes away, and nothing in the template, the success message or the stored record says so.
 
 **Impact**:
-- Any test whose input or output exceeds 260 characters is stored incomplete. Competitive programming test data frequently exceeds this, particularly generated tests with large arrays or matrices.
-- The loss is invisible in the UI. The test case table renders from the full fetched data, so the preview looks complete while the stored row is not. An operator comparing the page against the database sees a mismatch with no explanation.
-- The truncated copy is what a reviewer, a checker or any downstream consumer of the database would read, so it can produce wrong verdicts.
-- `rstrip()` also removes trailing whitespace, which matters for test data where trailing newlines are significant to a checker.
+
+Generated test data crosses 260 characters constantly, so this is not an edge case, it is the common case for larger inputs.
+
+The reason it is dangerous is that the UI renders previews from the full fetched data. You look at the page and it looks complete. You look at the database and it is not. Nothing bridges that gap, so the first person to notice is usually someone downstream trying to use the data.
+
+There is also a subtle mismatch with the bucket. Object storage keeps the complete files, so the two copies disagree and only the database is lossy. Anyone spot checking the bucket will conclude the database is at fault, which is correct, but it costs them time to work out.
 
 **Suggested Fix**:
-Store the full value in the database and truncate only for display, which is where truncation belongs. If a length limit is genuinely required, make it a named setting, count characters rather than bytes, and report the number of truncated fields to the user. Note that the object storage copy is already complete, so the database is the only lossy copy.
 
-**Why this priority**: This is silent data corruption on the primary output, and it is the second issue where the tool reports success while the stored data is wrong. It ranks below P1 because the truncation is bounded and predictable, whereas P1 leaves a structurally wrong row count that is much harder to detect later.
+Keep the full value in the database and truncate only for display, which is the only place truncation belongs. If a hard limit is genuinely needed, name it, count characters rather than bytes, and report how many fields were cut.
+
+**Why this rank**: second only to P1 because it is also silent corruption of the primary output. It sits lower mainly because the damage is bounded and predictable, whereas P1 leaves a structurally wrong row count that is much harder to detect after the fact.
 
 ---
 
-### [P3] A duplicate problem title surfaces a raw database constraint error
+### [P3] A duplicate title hands the user a raw database constraint error
 
 **Severity**: Medium
 
-**Location**: `problems/views.py` (`migrate_to_db` branch), database constraint `problems_problem_slug_key`
+**Location**: `problems/views.py`, `migrate_to_db` branch; constraint `problems_problem_slug_key`
 
 **Description**:
-Two different Polygon problems with the same title produce the same `slugify(title)` value. The second migration fails on the unique constraint, and the message the user sees is the driver's own text:
+
+Two Polygon problems called "Two Sum" both slugify to `two-sum`, and `Problem.slug` is `unique=True`. The second migration dies on the constraint and the user sees:
 
 ```
 Migration failed and all changes have been rolled back. Reason:
 duplicate key value violates unique constraint "problems_problem_slug_key"
 ```
 
-The message confirms that something failed and that the transaction rolled back, but it does not name the problem, explain that the title is already taken, or suggest a remedy.
+The message confirms something failed and that the transaction rolled back. It does not say which problem conflicted, that the title is the cause, or what to do next.
 
 **Impact**:
-- The user has to work backwards from a PostgreSQL constraint name to understand that two problems share a title. Most operators will read this as a database or migration fault rather than a naming conflict.
-- No hint is given about what to change. The slug is not editable anywhere in the UI, so the user cannot resolve it without a database change.
-- The error is reported on a page that otherwise looks healthy, which makes it easy to miss on a long migration session.
+
+Reading a PostgreSQL constraint name backwards to "these two problems share a title" is not a reasonable thing to ask of a user. Most will assume the database or the migration is broken.
+
+There is also nowhere to go from there. The slug is not editable anywhere in the interface, so the only exits are changing the title on Polygon or editing the database by hand.
 
 **Suggested Fix**:
-Catch `IntegrityError` around the problem write specifically, detect the slug collision, and report it in product language: "A problem titled '{title}' already exists in the database with the slug '{slug}' (Polygon ID {existing}). Migrate that problem instead, or choose a distinct title." Offer to disambiguate the slug by appending the Polygon ID.
 
-**Why this priority**: It is a genuine dead end with no route to resolution from the UI, and duplicate titles are common on Polygon where many setters reuse standard names such as "Two Sum". It ranks below P1 and P2 because nothing is corrupted and the failure is loud and obvious, so it will be noticed and reported immediately.
+Catch `IntegrityError` around the problem write on its own and report it in product language: which title is taken, which slug it produced, and the Polygon ID that already holds it. Offering to disambiguate automatically, by appending the Polygon ID to the slug, would turn a dead end into a decision.
+
+**Why this rank**: it is a genuine dead end with no in product route out, and duplicate titles are common on Polygon where "Two Sum" and friends get reused constantly. It ranks below P1 and P2 because nothing is corrupted and the failure is loud, so it gets reported immediately rather than sitting there.
 
 ---
 
@@ -128,35 +139,39 @@ Catch `IntegrityError` around the problem write specifically, detect the slug co
 
 **Severity**: High
 
-**Location**: `problems/views.py:207` (`with transaction.atomic():`) wrapping `problems/views.py:233` (`api.migrate_to_storage(...)`)
+**Location**: `problems/views.py:207` opens `transaction.atomic()`; `problems/views.py:233` calls `api.migrate_to_storage(...)` inside it
 
 **Description**:
-`transaction.atomic()` opens at line 207. The `migrate_to_azure` branch is the first block inside it, and the upload happens at line 233. A twelve test problem writes 24 objects to Backblaze B2, each a separate HTTPS round trip, while a PostgreSQL transaction is held open for the duration.
 
-This is why the manual compensation logic exists. On failure the code has to delete objects it already wrote, in a separate `except` block, because the database rollback cannot undo storage writes. A comment in the view records that compensation must never mask the original error.
+`with transaction.atomic():` opens at line 207. The `migrate_to_azure` branch is the first thing inside it, and the upload happens at line 233. A twelve test problem is 24 sequential HTTPS round trips to Backblaze, all of them inside an open PostgreSQL transaction.
+
+This is also where the compensation code comes from. When something fails we have to delete objects we already wrote, in a separate `except` block, because rolling back the database has no effect on the bucket. There is a comment in the view warning that this cleanup must never mask the original error, which is the kind of comment you only write after getting it wrong once.
 
 **Impact**:
-- A database connection is held open across network calls to an external service. Connection pool capacity is consumed for the whole upload, so concurrent migrations can exhaust the pool and stall unrelated requests.
-- Transaction lifetime scales with object count and with cloud latency, not with database work. For a 100 test problem that is 200 sequential HTTPS round trips inside an open transaction.
-- Partial failure is the normal case rather than the exception, and recovery depends on hand written compensation that has to be kept correct as the flow changes.
-- Cloud provider throttling makes this worse: a slow provider lengthens the transaction and increases the chance the database gives up first.
-- The ordering is also backwards. Uploading before the database commit means storage can be populated for a row that never commits.
+
+A database connection is held for the whole upload. Under concurrency that is pool capacity burned on network latency, and you will see unrelated requests queue up behind it.
+
+Transaction length scales with test count and cloud latency rather than with database work. A hundred test problem is two hundred round trips inside a transaction.
+
+The nastiest part is that partial failure stops being exceptional and becomes normal, and recovery depends on hand written compensation that has to be kept correct as the flow changes. It also pushes in the wrong order: we upload before the database commit, so storage can end up populated for a row that never committed.
 
 **Suggested Fix**:
-Two changes, in order of value. First, move the upload outside the transaction: commit the database work, then upload, and on failure record the problem as needing a retry rather than trying to unwind storage. Second, if an atomic guarantee is required, write an outbox row inside the transaction and process uploads in a separate worker, which makes the database the single source of truth and removes the compensation path entirely.
 
-**Why this priority**: This is the structural problem underneath P1 and the rollback complexity. It is the reason the most complicated part of the codebase exists, it degrades under exactly the load the tool is meant to absorb, and fixing it properly would remove a whole class of bugs rather than one instance.
+Two steps, in this order. Move the upload out of the transaction: commit the database work, then upload, and on failure mark the problem as needing a retry instead of trying to unwind storage. If you want a real guarantee, write an outbox row inside the transaction and process uploads in a worker, which makes the database the single source of truth and deletes the compensation path entirely.
+
+**Why this rank**: it is the structural problem sitting underneath P1 and underneath the rollback complexity. Fixing it properly removes a category of bugs rather than one instance, and it is what makes the other flows safe to change.
 
 ---
 
-### [C2] Test case synchronisation is a positional per-row save loop with no bulk path
+### [C2] Test cases are synced with a positional per-row save loop
 
 **Severity**: Medium
 
-**Location**: `problems/views.py:528-556`, and the equivalent sample loop at `problems/views.py:466`
+**Location**: `problems/views.py:528-556`, mirrored by the sample loop at `problems/views.py:466`
 
 **Description**:
-Each test case is matched to an existing row by its position in the ordered list and then persisted with an individual `save()`:
+
+Each test is paired with an existing row by its position in the ordered list, then saved individually:
 
 ```python
 existing_test_cases = list(ProblemTestCase.objects.filter(problem=problem_obj).order_by('order'))
@@ -165,28 +180,33 @@ existing_test_cases = list(ProblemTestCase.objects.filter(problem=problem_obj).o
     ptc.save()
 ```
 
-This is one UPDATE per test rather than a bulk `bulk_update` or `update_or_create`. The same pattern is repeated for `SampleTestCase`.
+That is one UPDATE per test where `bulk_update` or `update_or_create` would do. The same shape is repeated for `SampleTestCase`.
 
 **Impact**:
-- Two database round trips per test case. A 100 test problem issues 200 statements where a bulk operation would issue two. The cost grows linearly with problem size inside a transaction, which is the worst place to pay it given C1.
-- Matching by position is fragile. It silently rewrites the wrong row if the ordering ever differs from Polygon's, and it is the direct cause of the surplus rows described in P1, because rows past the end of the list are simply never visited.
-- The duplicated shape of the two loops means a fix to one has to be remembered in the other.
+
+Two round trips per test case. A hundred test problem issues two hundred statements instead of two, and it pays that cost inside a transaction, which is the worst possible place to pay it given C1.
+
+Matching on position is also brittle. If the ordering ever differs from Polygon's it will quietly rewrite the wrong row, and it is the direct cause of the surplus rows in P1, since rows beyond the end of the fetched list are simply never visited.
+
+The duplicated shape of the two loops means a fix applied to one has to be remembered in the other.
 
 **Suggested Fix**:
-Load the existing rows into a dictionary keyed by `order` rather than relying on list position, delete the keys that are no longer present, and write the remainder with `bulk_create` and `bulk_update`. Extract the shared logic so the sample and regular loops cannot drift apart.
 
-**Why this priority**: It is a clear performance and maintainability problem with a correct fix available, but it produces wrong results only through the surplus row behaviour already counted as P1, and it does not corrupt data on its own.
+Index the existing rows by `order` in a dict rather than trusting list position, delete the keys that no longer appear, and write the rest with `bulk_create` and `bulk_update`. Pull the shared logic out so the sample and regular paths cannot drift.
+
+**Why this rank**: a clear performance and maintainability problem with a correct fix available. It only produces wrong results through the surplus row behaviour already counted as P1, and on its own it does not corrupt anything.
 
 ---
 
-### [C3] The Redis cache is never reconciled with Polygon, so cached data can be silently out of date
+### [C3] The Redis cache is never checked against Polygon, so it can be quietly out of date
 
 **Severity**: Medium
 
-**Location**: `problems/polygon_api.py:413` (`get_all_test_cases`) and `problems/polygon_api.py:843` (`get_test_cases_from_redis`); consumed at `problems/views.py:517`
+**Location**: `problems/polygon_api.py:413` (`get_all_test_cases`), `problems/polygon_api.py:843` (`get_test_cases_from_redis`), consumed at `problems/views.py:517`
 
 **Description**:
-Every action that needs test cases consults Redis first and only calls Polygon on a miss:
+
+Anything that needs test cases asks Redis first and only calls Polygon on a miss:
 
 ```python
 test_cases = api.get_test_cases_from_redis(polygon_id)
@@ -195,18 +215,23 @@ if test_cases is None:
     api.cache_test_cases(polygon_id, test_cases)
 ```
 
-The cache is written with a 0.5 hour expiry and is cleared on rollback. There is no comparison against Polygon's `problem.tests`, which is the one cheap call that reports the current test count, so nothing detects that the setter has changed the problem.
+Entries expire after half an hour and are cleared on rollback. Nothing compares the cache against Polygon's `problem.tests`, which is the one cheap call that reports the current test count, so nothing notices that the setter has changed the problem.
 
 **Impact**:
-- For up to 30 minutes after a setter edits tests, the tool reports the previous contents as current. A migration in that window writes outdated rows to the database and outdated files to storage, and reports success.
-- This is the mechanism that can make P1 hard to reproduce. Re-running a migration after a Polygon edit may appear to fix nothing, because the second run reads the same cached copy.
-- The cached copy is trusted for the destructive path as well as the read path, so a stale entry can feed a write.
-- The cache key contains only the Polygon ID, so it cannot distinguish problem versions.
+
+For up to thirty minutes after an edit, the tool reports the previous contents as current. A migration in that window writes outdated rows, uploads outdated files and reports success.
+
+This is also what makes P1 awkward to reproduce. You can re-run the migration after changing a problem on Polygon, see no change at all, and conclude the bug is intermittent when in fact the second run read the same cached copy.
+
+Worth being explicit about: the cache feeds the destructive path, not just the read path. A stale entry can be the thing that gets written.
+
+The key contains only the Polygon ID, so there is no way for it to distinguish one version of a problem from another.
 
 **Suggested Fix**:
-Always call `problem.tests` first, which is a single cheap request, and compare the returned test count against the cached copy. Invalidate and refetch on any difference. At minimum, surface the cache age in the UI so an operator can tell fresh data from cached data. A `tests_version` or `updatedTime` value from Polygon, if available, would make this exact rather than approximate.
 
-**Why this priority**: It is the correctness risk that is hardest to diagnose in production, because the failure is intermittent and time dependent, and it silently amplifies P1. It sits at Medium rather than High only because the window is bounded at 30 minutes and self healing.
+Call `problem.tests` first every time. It is one cheap request and it tells you the current count, which is enough to invalidate and refetch when it disagrees. At minimum, show the cache age in the UI so a person can tell fresh data from cached data. If Polygon exposes a version or update timestamp, keying on that would make this exact rather than approximate.
+
+**Why this rank**: it is the correctness problem hardest to diagnose in production, because the failure depends on timing and shows up intermittently, and it silently amplifies P1. Medium rather than High only because the half hour window is bounded and self healing.
 
 ---
 
@@ -220,19 +245,19 @@ Always call `problem.tests` first, which is a single cheap request, and compare 
 
 > A Polygon problem has 0 sample test cases but 15 regular test cases. What happens when you migrate this problem?
 
-**Tested.** I created this shape and ran the migration against a real PostgreSQL database.
+**Tested.** I built this exact shape and migrated it against a real PostgreSQL database.
 
-The migration succeeds. Nothing is rejected for having no samples. Afterwards the database contains:
+It works. Nothing objects to a problem having no samples. Afterwards:
 
 * `problems_sampletestcase`: **0 rows**
 * `problems_problemtestcase`: **15 rows**, every one with `is_sample = false`
-* `problems_problem`: 1 row, with `test_case_count = 15`
+* `problems_problem`: 1 row with `test_case_count = 15`
 
-**Why**: `sample_test_cases` are not inferred from the data, they come from Polygon's own `useInStatements` flag on each entry of `problem.tests`. With no sample tests, every entry has that flag false. The view creates `SampleTestCase` rows only for entries where the flag is true, so the loop simply never runs for that model. `ProblemTestCase` rows are created for every test regardless, which is why all 15 appear there.
+The reason is that samples are never guessed from the data. They come from the `useInStatements` flag Polygon puts on each entry in `problem.tests`, and with no sample tests that flag is false for all fifteen. The view only creates `SampleTestCase` rows for entries where it is true, so for that model the loop simply never runs. `ProblemTestCase` rows are created for every test regardless, which is where the fifteen come from.
 
-**Consequence for the user**: The page renders a "Sample Test Case" column reading "No" on all 15 rows, which is correct rather than broken. Nothing in the UI or the validation layer requires a minimum of three samples, so a problem with no samples is indistinguishable from any other complete migration.
+So the page renders a "Sample Test Case" column reading "No" down all fifteen rows, which is accurate rather than broken. Worth noting that nothing anywhere requires a minimum of three samples, so a problem with none is indistinguishable from any other completed migration.
 
-**Distinguishing tested from read**: the row counts, the `is_sample` values and the absence of an error message were all observed. The explanation that the flag comes from `useInStatements` is from reading `get_all_test_cases()` and the sample branch in the view.
+*Tested versus read*: row counts, the `is_sample` values and the absence of any error were observed. The explanation involving `useInStatements` is from reading `get_all_test_cases()` and the sample branch of the view.
 
 ---
 
@@ -240,21 +265,21 @@ The migration succeeds. Nothing is rejected for having no samples. Afterwards th
 
 > A problem is migrated with 20 test cases. Later, the problem setter removes 8 test cases on Polygon (now 12 remain). The problem is re-migrated. What happens?
 
-**Tested, on both the warm and the cold cache path.** This is the behaviour behind P1.
+**Tested on both the cold and the warm cache path.** This is P1 in practice.
 
-**Cold cache, the interesting case.** After the re-migration:
+**Cold cache, the interesting one.** After re-migrating:
 
-* `problems_problemtestcase`: **20 rows**, unchanged in count. **0 rows deleted.**
-* Rows 1 to 12 are overwritten with the current content.
-* Rows 13 to 20 keep their previous input, output and description, that is, the content of the 8 tests that were withdrawn on Polygon.
-* The UI reports "Test cases description migrated to database Successfully."
-* Object storage is correct: it holds only 12 test cases, because the upload path replaces the whole `test_cases/{id}/` prefix.
+* `problems_problemtestcase`: **20 rows**, count unchanged. **Nothing deleted.**
+* Rows 1 to 12 rewritten with current content.
+* Rows 13 to 20 untouched, still holding the eight withdrawn tests.
+* UI reports "Test cases description migrated to database Successfully."
+* Object storage is correct, holding 12 test cases, because the upload path replaces the whole `test_cases/{id}/` prefix.
 
-**Warm cache, the more misleading case.** If the previous migration populated Redis less than 30 minutes ago, the re-migration reads the cached 20 test cases, not the current 12. It therefore rewrites all 20 rows with the same values they already had and reports success. Nothing changes at all, and the operator sees a clean run rather than a skipped one.
+**Warm cache, the more misleading one.** If a previous migration warmed Redis within the last thirty minutes, the re-migration reads the cached twenty rather than the current twelve. It rewrites all twenty rows with the values they already had and reports success. Nothing changes, and it looks like a clean run rather than a skipped one, which is arguably worse than an error because it invites no further attention.
 
-**Why**: the loop at `views.py:530` walks the fetched test cases and writes each one, and the update branch is guarded by `if idx < len(existing_test_cases)`. Once `idx` reaches 12 the guard fails and new rows stop being created, but nothing walks the remaining entries of `existing_test_cases` to remove them. The surplus is invisible because the success message reports only that the operation completed.
+The mechanism is the `if idx < len(existing_test_cases)` guard at `views.py:530`. Once `idx` hits 12 the guard fails and no new rows are created, but nothing ever walks the rest of `existing_test_cases` to remove them. The surplus is invisible because the success message only reports that the operation completed.
 
-**Distinguishing tested from read**: the row counts, the survival of the 8 removed tests, the unchanged storage prefix and both messages were observed. The `idx < len(existing_test_cases)` guard and the absence of any delete call are from reading the loop.
+*Tested versus read*: row counts, survival of the eight removed tests, the storage prefix and both messages were observed. The guard and the absence of any delete are from reading the loop.
 
 ---
 
@@ -262,18 +287,18 @@ The migration succeeds. Nothing is rejected for having no samples. Afterwards th
 
 > Two different Polygon problems have the exact same title: "Two Sum". You migrate the first one successfully. Then you try to migrate the second one. What happens?
 
-**Tested.** The first migration commits. The second fails on the database, not on Polygon.
+**Tested.** The first commits. The second fails at the database, not at Polygon.
 
-* The second request raises `IntegrityError` naming the unique constraint `problems_problem_slug_key`.
-* The failure happens inside `transaction.atomic()`, so **no partial row is created**. I confirmed there is no second `Problem` row, no orphan `ProblemTag` rows and no `SampleTestCase` or `ProblemTestCase` rows for the second problem. The rollback is clean.
-* No objects are written to cloud storage, because the write fails before the upload stage.
-* The user sees HTTP 200 with the message: "Migration failed and all changes have been rolled back. Reason: duplicate key value violates unique constraint "problems_problem_slug_key""
+* It raises `IntegrityError` naming `problems_problem_slug_key`.
+* It fails inside `transaction.atomic()`, so **nothing partial is left behind**. I checked specifically: no second `Problem` row, no orphaned `ProblemTag` rows, no `SampleTestCase` or `ProblemTestCase` rows for the second problem. The rollback is clean.
+* No objects reach cloud storage, because the write fails before the upload stage is reached.
+* The user gets HTTP 200 and "Migration failed and all changes have been rolled back. Reason: duplicate key value violates unique constraint "problems_problem_slug_key""
 
-**Why**: `slugify("Two Sum")` produces the same value for both problems, and `Problem.slug` is declared `unique=True`. `update_or_create` looks the problem up by `polygon_id`, which differs, so it correctly attempts an insert rather than an update, and the database rejects it. The matching on `polygon_id` is the right key and is not the problem here; the collision is on the derived slug.
+The cause is `slugify("Two Sum")` colliding, with `Problem.slug` declared `unique=True`. Note that `update_or_create` is keying on `polygon_id`, which differs between the two problems, so it correctly attempts an insert rather than updating the first one. Keying on `polygon_id` is right and is not the problem here. The collision is on the derived slug, which nothing checks before the write.
 
-**Practical consequence**: because the slug is not user editable anywhere in the interface, there is no way to resolve this from the UI. The user has to change the title on Polygon or intervene in the database. This is why P3 recommends naming the conflict in product language and offering to disambiguate the slug, for example by appending the Polygon ID.
+Practically, since the slug is not editable in the interface, there is no way out of this from the UI. That is the argument for P3: name the conflict properly and offer to disambiguate the slug, perhaps by appending the Polygon ID.
 
-**Distinguishing tested from read**: the constraint name, the absence of partial rows, the clean tag and test case state, the storage behaviour and the exact message were all observed. The role of `slugify` and the `unique=True` declaration are from reading the view and the model.
+*Tested versus read*: the constraint name, the absence of partial rows, the clean tag and test case state, the storage behaviour and the exact wording were all observed. The role of `slugify` and the `unique=True` declaration are from reading the view and the model.
 
 ---
 
@@ -281,26 +306,27 @@ The migration succeeds. Nothing is rejected for having no samples. Afterwards th
 
 > When test cases are saved to the database via "Migrate Test Cases to DB", some data is intentionally discarded. What data is lost? Why might this cause problems?
 
-**Tested and read.** Four separate losses, all in the path that writes `ProblemTestCase` and `SampleTestCase`.
+**Tested and read.** Four separate losses, all on the path that writes `ProblemTestCase` and `SampleTestCase`.
 
-**1. Input and output are truncated to 260 characters.** `views.py:537-539` slices `input_data[:260]` and `output_data[:260]`. Anything past 260 characters is discarded permanently from the database copy. The comment describes this as bytes, but it is characters.
+**Input and output are cut to 260 characters.** `views.py:537-539` slices `input_data[:260]` and `output_data[:260]`. Everything past that is gone from the database copy for good. The comment calls it bytes; it is characters.
 
-**2. Input and output are right stripped.** `views.py:531-532` applies `.rstrip()` before truncation, so trailing whitespace and newlines are removed from the stored value.
+**Input and output are right stripped.** `views.py:531-532` applies `.rstrip()` before truncating, so trailing whitespace and newlines go too.
 
-**3. Test descriptions are lost on the cached path.** Polygon supplies a `description` only for tests it classifies as `manual`. Generated tests have no `input` or description in the `problem.tests` payload, and the description is not carried through the Redis cache round trip. So on a warm cache the `description` column is written empty even for tests that have one.
+**Descriptions disappear on the cached path.** Polygon supplies a `description` only for tests it marks `manual`. Generated tests carry neither input nor description in the `problem.tests` payload, and the description does not survive the Redis round trip. On a warm cache the `description` column is written empty even for tests that do have one.
 
-**4. The `index` and `manual` markers are never persisted.** Polygon's `problem.tests` returns both fields. The `ProblemTestCase` model has no column for either, so they are read and then discarded. There is no record of which tests were hand written and which were generated.
+**The `index` and `manual` markers are never stored.** Polygon returns both from `problem.tests`. `ProblemTestCase` has no column for either, so they are read and dropped. There is no record of which tests were hand written and which were machine generated.
 
-**Why this causes problems**:
-* The database becomes an incomplete copy of the test data, with no field recording that it is incomplete. Anything reading it downstream, a judge, a reviewer or a checker, cannot tell that what it holds has been cut short.
-* Trailing whitespace can be significant to a checker that compares raw output, so stripping it can turn a correct solution into an incorrect verdict.
-* Losing the `manual` and `index` markers removes the ability to distinguish curated tests from generated ones, which is usually the first thing needed when a failure is investigated.
-* The loss is invisible in the UI. Previews are rendered from the full fetched data, so the page looks correct while the stored row is not. This is the mismatch behind P2.
-* It matters that **object storage still holds the complete bytes**. The two copies disagree, and only one of them is lossy, so a reader who checks the bucket will conclude the database is wrong.
+Why this causes problems:
 
-**Suggested fix**: keep the full text in the database, truncate only for display, and add columns for `manual` and the original `index` if the distinction is worth keeping.
+* The database ends up an incomplete copy with no field recording the incompleteness. Anything reading it downstream, a judge, a reviewer, a checker, has no way to tell it has been cut short.
+* Trailing whitespace can matter to a checker comparing raw output, so stripping it can turn a correct solution into a wrong verdict.
+* Losing `manual` and `index` removes the ability to separate curated tests from generated ones, which is usually the first thing anyone wants when a failure is being investigated.
+* None of it is visible in the UI. Previews render from the full fetched data, so the page looks right while the stored row is not. That mismatch is P2.
+* Object storage still holds the complete bytes. The copies disagree and only one is lossy, so anyone checking the bucket will conclude the database is at fault.
 
-**Distinguishing tested from read**: the truncation and strip behaviour, the empty descriptions on the cached path, and the mismatch between the database copy and the stored object were all observed. The claim that `index` and `manual` are absent from the model is from reading `problems/models.py` and the write loop.
+The fix is the one from P2: keep the full text in the database, truncate for display only, and add columns for `manual` and the original `index` if that distinction is worth keeping.
+
+*Tested versus read*: the truncation and stripping, the empty descriptions on the cached path and the mismatch between the database copy and the stored object were all observed. The claim that `index` and `manual` have no home in the model is from reading `problems/models.py` and the write loop.
 
 ---
 
@@ -319,10 +345,10 @@ Use these definitions when assigning severity:
 
 ## Notes
 
-**Things I fixed rather than listed as issues.** Working through the codebase I found and corrected a stored cross site scripting hole in the tag rendering path, a migration blocker caused by two model fields having no migration, a zero padded object key that violated the required layout, and two provider faults that only appeared against a live S3 endpoint. They are described here so the reviewer knows they were found, but they are not in the ranked lists because they are no longer defects.
+**Things I fixed rather than listed.** Working through this I found and corrected a stored cross site scripting hole in the tag rendering path, a migration blocker caused by two model fields having no migration, a zero padded object key that broke the required layout, and two provider faults that only appeared against a live S3 endpoint. They are mentioned so the reviewer knows they were found, but they are not in the ranked lists because they are not defects any more.
 
-**Two deliberate design choices that look like bugs.** First, object keys use the database `Problem.id` rather than the Polygon ID, and the upload button is disabled until a database row exists. That ordering looks odd but is required by the storage layout, so I left it. Second, raw exception text is shown to the user on failure. It reads as leaked internals, but for a duplicate title the constraint name in that text is the only clue the user gets, so I kept it and only fixed the case where it was empty.
+**Two things that look like bugs and are not.** Object keys use the database `Problem.id` rather than the Polygon ID, and the storage button stays disabled until a database row exists. That ordering looks strange but the storage layout requires it, so I left it alone. Separately, raw exception text is shown to the user on failure. It reads like leaked internals and I did try to replace it with something tidier, which broke five tests and made things worse: for a duplicate title the constraint name is the only signal available. I reverted that and now only step in when the message would otherwise be empty.
 
-**A structural observation.** `index()` in `problems/views.py` is one view roughly 590 lines long handling authentication, fetching, parsing, four migration paths, rollback and compensation. Every finding above lives in that function. Splitting it into one view per action would make the flows independently testable and would let the storage upload leave the transaction in C1 without restructuring everything around it.
+**The structural note.** `index()` is one view of roughly 590 lines covering authentication, fetching, parsing, four migration paths, rollback and compensation. Every finding above lives in that function. Splitting it into one view per action would make the flows independently testable, and would let the upload in C1 move out of the transaction without restructuring everything around it.
 
-**Not covered.** I did not load test the tool, so I cannot put a number on how C1 behaves under concurrency. I also did not verify behaviour for problems with more than about 100 test cases, so the cost figures in C2 are extrapolated from the per row pattern rather than measured.
+**What I did not cover.** I did not load test this, so I cannot put a number on how C1 behaves under concurrency. I also never exercised a problem with more than about a hundred test cases, so the cost figures in C2 are extrapolated from the per row pattern rather than measured.
