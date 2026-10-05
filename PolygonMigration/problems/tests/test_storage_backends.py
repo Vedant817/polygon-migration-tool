@@ -102,6 +102,131 @@ class S3BackendTests(SimpleTestCase):
         self.assertEqual(build_test_case_key(12, 11, is_answer=True), "test_cases/12/11.a")
 
 
+class S3EnsureContainerTests(SimpleTestCase):
+    """Bucket creation must match the provider's CreateBucket expectations."""
+
+    def _client(self, region):
+        import boto3
+        from botocore.config import Config
+        return boto3.client("s3", aws_access_key_id="k", aws_secret_access_key="s",
+                            region_name=region,
+                            config=Config(s3={"addressing_style": "path"}))
+
+    def _store(self, region):
+        store = S3BlobStorage.__new__(S3BlobStorage)
+        store.container = "testcases"
+        store.client = self._client(region)
+        return store
+
+    def _capture_create_bucket(self, store, expected_params=None):
+        """Queue a 404 for head_bucket, then capture the create_bucket call."""
+        from botocore.stub import Stubber
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_response("create_bucket", {},
+                             expected_params if expected_params is not None else {})
+        stubber.activate()
+        store.ensure_container()
+        return stubber
+
+    def test_r2_auto_region_sends_no_location_constraint(self):
+        """Cloudflare R2 uses region 'auto' and rejects any LocationConstraint."""
+        store = self._store("auto")
+        stubber = self._capture_create_bucket(store, {"Bucket": "testcases"})
+        stubber.assert_no_pending_responses()
+
+    def test_us_east_1_sends_no_location_constraint(self):
+        store = self._store("us-east-1")
+        stubber = self._capture_create_bucket(store, {"Bucket": "testcases"})
+        stubber.assert_no_pending_responses()
+
+    def test_real_region_sends_its_location_constraint(self):
+        store = self._store("eu-west-1")
+        stubber = self._capture_create_bucket(
+            store, {"Bucket": "testcases",
+                    "CreateBucketConfiguration": {"LocationConstraint": "eu-west-1"}})
+        stubber.assert_no_pending_responses()
+
+    def test_existing_bucket_is_not_recreated(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_response("head_bucket", {}, {"Bucket": "testcases"})
+        stubber.activate()
+        store.ensure_container()          # must not consume any create_bucket response
+        stubber.assert_no_pending_responses()
+
+    def test_location_constraint_rejection_is_retried_without_it(self):
+        """Backblaze B2 derives region from the endpoint and rejects the constraint."""
+        from botocore.stub import Stubber
+        store = self._store("us-east-005")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_client_error(
+            "create_bucket",
+            service_error_code="IllegalLocationConstraintException",
+            service_message="The specified location constraint is not valid",
+            http_status_code=400,
+            expected_params={"Bucket": "testcases",
+                             "CreateBucketConfiguration":
+                                 {"LocationConstraint": "us-east-005"}})
+        stubber.add_response("create_bucket", {}, {"Bucket": "testcases"})
+        stubber.activate()
+        store.ensure_container()          # must not raise
+        stubber.assert_no_pending_responses()
+
+    def test_create_bucket_failure_without_constraint_still_raises(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_client_error("create_bucket", service_error_code="AccessDenied",
+                                 service_message="no", http_status_code=403)
+        stubber.activate()
+        with self.assertRaises(BlobStorageError):
+            store.ensure_container()
+
+    def test_bucket_scoped_key_denied_head_bucket_still_proceeds(self):
+        """Backblaze bucket-scoped keys cannot list bucket names unless
+        listAllBucketNames is granted, so HeadBucket answers 403 for a bucket
+        that is perfectly usable. ensure_container must carry on, not fail."""
+        from botocore.stub import Stubber
+        store = self._store("us-east-005")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="AccessDenied",
+                                 service_message="Access Denied", http_status_code=403)
+        stubber.activate()
+        store.ensure_container()          # must not raise, must not attempt create_bucket
+        stubber.assert_no_pending_responses()
+
+    def test_invalid_credentials_still_raise(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="InvalidAccessKeyId",
+                                 service_message="Malformed Access Key Id",
+                                 http_status_code=403)
+        stubber.activate()
+        with self.assertRaises(BlobStorageError):
+            store.ensure_container()
+
+    def test_already_owned_bucket_is_not_an_error(self):
+        from botocore.stub import Stubber
+        store = self._store("auto")
+        stubber = Stubber(store.client)
+        stubber.add_client_error("head_bucket", service_error_code="404",
+                                 service_message="Not Found", http_status_code=404)
+        stubber.add_client_error("create_bucket",
+                                 service_error_code="BucketAlreadyOwnedByYou",
+                                 service_message="owned", http_status_code=409)
+        stubber.activate()
+        store.ensure_container()          # must not raise
+        stubber.assert_no_pending_responses()
+
+
 class AzureBackendTests(SimpleTestCase):
     """Azure SDK calls are mocked; the contract (keys, error wrapping) is asserted."""
 

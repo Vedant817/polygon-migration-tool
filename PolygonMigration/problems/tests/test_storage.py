@@ -10,6 +10,7 @@ backend is unavailable. S3-specific request shapes are asserted with
 
 import os
 import shutil
+import unittest
 from unittest import mock
 
 from django.conf import settings
@@ -301,7 +302,8 @@ class StorageIntegrationTests(SimpleTestCase):
     def setUpClass(cls):
         super().setUpClass()
         if not _backend_available():
-            raise cls.skipTest("configured storage backend is unavailable")
+            raise unittest.SkipTest(
+                f"configured storage backend ({settings.STORAGE_PROVIDER}) is unavailable")
 
     def setUp(self):
         self.store = get_storage()

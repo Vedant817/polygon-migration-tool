@@ -233,10 +233,23 @@ class S3BlobStorage(BlobStorage):
             return
         except ClientError as exc:
             status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = exc.response.get("Error", {}).get("Code")
             if status == 404:
                 pass                       # bucket absent -> create it
             elif status in (301, 400):
                 # Bucket exists in another region / is owned elsewhere.
+                return
+            elif status in (401, 403) and code not in ("InvalidAccessKeyId",
+                                                  "SignatureDoesNotMatch",
+                                                  "ExpiredToken",
+                                                  "InvalidToken"):
+                # A key restricted to one bucket may not be allowed to list bucket
+                # names (Backblaze calls this listAllBucketNames), so HeadBucket
+                # answers 403 even though the bucket is perfectly usable. Carry on:
+                # the first upload is the real test and fails loudly if the bucket
+                # name is wrong. Credential errors are NOT swallowed - they raise.
+                logger.info("HeadBucket on %r returned %s (%s); continuing without "
+                            "creating it", self.container, status, code or "no code")
                 return
             else:
                 raise BlobStorageError(f"S3 bucket {self.container!r} unavailable: {exc}") from exc
@@ -245,16 +258,35 @@ class S3BlobStorage(BlobStorage):
 
         kwargs = {"Bucket": self.container}
         region = getattr(self.client, "meta", None) and self.client.meta.region_name
-        if region and region != "us-east-1":
-            # us-east-1 must not carry a LocationConstraint; other regions must.
+        if region and region not in ("us-east-1", "auto"):
+            # us-east-1 must not carry a LocationConstraint, other real regions must.
+            # "auto" is the convention Cloudflare R2 requires, and R2 rejects any
+            # LocationConstraint outright, so nothing is sent for it.
             kwargs["CreateBucketConfiguration"] = {"LocationConstraint": region}
         try:
             self.client.create_bucket(**kwargs)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code")
-            if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
-                raise BlobStorageError(
-                    f"S3 bucket {self.container!r} could not be created: {exc}") from exc
+            if code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                return
+            if "CreateBucketConfiguration" in kwargs:
+                # Backblaze B2 and some other S3-compatible endpoints derive the
+                # region from the endpoint URL and reject the constraint. Retry
+                # once without it rather than failing the whole migration.
+                logger.info("Retrying create_bucket without a LocationConstraint for %r",
+                            self.container)
+                try:
+                    self.client.create_bucket(Bucket=self.container)
+                    return
+                except ClientError as retry_exc:
+                    retry_code = retry_exc.response.get("Error", {}).get("Code")
+                    if retry_code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                        return
+                    raise BlobStorageError(
+                        f"S3 bucket {self.container!r} could not be created: {retry_exc}"
+                    ) from retry_exc
+            raise BlobStorageError(
+                f"S3 bucket {self.container!r} could not be created: {exc}") from exc
 
     def upload_bytes(self, key, data):
         try:
